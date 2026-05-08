@@ -44,5 +44,5 @@ cache_ttl_seconds:
   contract_detail: 3600
 
 http:
-  timeout_seconds: 15
-  max_retries: 2
+  timeout_seconds: 20    # was 15; bumped to absorb transient network slowness
+  max_retries: 3         # was 2; gives 4 attempts total (0.4s, 0.8s, 1.2s back-off)

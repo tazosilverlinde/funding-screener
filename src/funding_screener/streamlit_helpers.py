@@ -55,7 +55,15 @@ def freshness_banner(store: DataStore) -> None:
     cols[0].metric("Funding/contracts", _age(last_fast))
     cols[1].metric("Klines (5m)", _age(last_slow))
     if err:
-        cols[2].error(f"Background error: {err}")
+        # Dampen transient network errors — only escalate to red when stale.
+        is_transient = "Timeout" in err or "ConnectError" in err or "cooldown" in err
+        is_stale = last_fast is None or (
+            (datetime.now(timezone.utc) - last_fast).total_seconds() > 300
+        )
+        if is_transient and not is_stale:
+            cols[2].info(f"⏱ Transient: {err}")
+        else:
+            cols[2].error(f"Background error: {err}")
     else:
         cols[2].success("Background updater healthy")
 
