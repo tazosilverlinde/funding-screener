@@ -62,13 +62,55 @@ for r in mexc.funding:
 
 # ---------------- load unlocks ----------------
 
-events = load_upcoming_unlocks(tradable_symbols=tradable)
-events = attach_usd_values(events, price_map)
+all_events = load_upcoming_unlocks(tradable_symbols=tradable)
+all_events = attach_usd_values(all_events, price_map)
+
+# ---------------- filter controls ----------------
+
+st.markdown("### Filters")
+fc1, fc2, fc3 = st.columns([1.2, 1, 2])
+
+window_choice = fc1.selectbox(
+    "Time window",
+    ["This week (7d)", "Next 30d", "All upcoming"],
+    index=0,
+    help="Filter to events within this many days.",
+)
+min_pct = fc2.slider(
+    "Min % of supply",
+    min_value=0.0,
+    max_value=10.0,
+    value=5.0,
+    step=0.5,
+    help="Drop events smaller than this % of circulating supply. 5% is the default — 'big enough to matter'.",
+)
+quick_button = fc3.button(
+    "Reset to default (≥5% this week)",
+    help="Reset both filters to their defaults.",
+    use_container_width=False,
+)
+if quick_button:
+    st.rerun()  # streamlit re-renders with default values
+
+window_days_map = {"This week (7d)": 7, "Next 30d": 30, "All upcoming": 10**6}
+window_days = window_days_map[window_choice]
+
+events = [
+    e for e in all_events
+    if e.days_until <= window_days
+    and (e.pct_of_supply is not None and e.pct_of_supply >= min_pct
+         or (min_pct == 0.0 and (e.pct_of_supply is None or e.pct_of_supply >= 0)))
+]
+# When min_pct > 0 we strictly require the event to have a known pct_of_supply
+# above the threshold (events with unknown pct_of_supply are excluded — we
+# can't tell their impact). When min_pct == 0, include everything.
+if min_pct > 0:
+    events = [e for e in events if e.pct_of_supply is not None and e.pct_of_supply >= min_pct]
 
 
 # ---------------- empty state with instructions ----------------
 
-if not events:
+if not all_events:
     st.info(
         "**No upcoming unlocks in `config/token_unlocks.yaml`** for tokens currently "
         "listed on Binance or MEXC futures.\n\n"
@@ -95,20 +137,33 @@ unlocks:
     )
     st.stop()
 
+# After filtering: maybe nothing matches the filter even though YAML has events.
+if not events:
+    st.warning(
+        f"**No upcoming events match the current filter** "
+        f"(window: {window_choice}, min ≥ {min_pct:.1f}% of supply).\n\n"
+        f"Loosen the filter above, or add more entries to `config/token_unlocks.yaml`."
+    )
+    st.stop()
+
 
 # ---------------- display ----------------
 
-# Quick stats
+# Quick stats — using the FILTERED set so they reflect what's on screen.
 total_events = len(events)
+total_unlock_usd = sum((e.amount_usd or 0.0) for e in events)
 within_7d = sum(1 for e in events if e.days_until <= 7)
-within_30d = sum(1 for e in events if e.days_until <= 30)
 high_impact = sum(1 for e in events if e.impact_label() == "High")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total upcoming", total_events)
-c2.metric("Next 7 days", within_7d)
-c3.metric("Next 30 days", within_30d)
-c4.metric("High impact (≥3% supply)", high_impact, help="Unlocks of ≥3% of circulating supply usually move price.")
+c1.metric("Events shown", total_events)
+c2.metric("Within 7 days", within_7d)
+c3.metric("≥3% supply (high impact)", high_impact)
+c4.metric(
+    "Total $ unlocking",
+    f"${total_unlock_usd / 1e6:,.1f}M" if total_unlock_usd > 0 else "—",
+    help="Sum of USD value of all unlock events shown.",
+)
 
 st.divider()
 

@@ -163,6 +163,82 @@ with st.expander("Per-exchange breakdown", expanded=False):
 
 st.divider()
 
+# ---------------- 7-day daily flows for stables + BTC + ETH ----------------
+
+st.divider()
+st.subheader("Macro flows — last 7 days, daily")
+st.caption(
+    "Net flow per day for stablecoins (USDT, USDC) + BTC (via WBTC) + ETH (via WETH). "
+    "Positive bars = withdrawals exceeded deposits (off-exchange accumulation). "
+    "Negative bars = deposits exceeded withdrawals (likely sell-side flow)."
+)
+
+macro_flows, macro_at = store.read_macro_daily_flows()
+if not macro_flows:
+    st.info(
+        "First 7-day macro-flow scan in progress. Refresh in a few minutes — "
+        "this loop runs every 6 hours and the first scan after deploy takes 1-3 minutes."
+    )
+else:
+    macro_cols = st.columns(min(4, len(macro_flows)))
+    for i, sym in enumerate(["USDT", "USDC", "WBTC", "WETH"]):
+        if sym not in macro_flows:
+            continue
+        col = macro_cols[i % len(macro_cols)]
+        rows = macro_flows[sym]
+        net_total_7d = sum(r["net_usd"] for r in rows)
+        col.metric(
+            f"{sym} 7d net",
+            f"${net_total_7d / 1e6:+,.1f}M",
+            help=f"Sum of net flow for {sym} over the 7-day window. "
+                 f"Positive = net withdrawals (bullish bias for the asset).",
+        )
+
+    # Build a stacked bar chart.
+    chart_rows: list[dict] = []
+    for sym, rows in macro_flows.items():
+        for r in rows:
+            chart_rows.append({
+                "Date": r["date"],
+                "Token": sym,
+                "Net (USD)": r["net_usd"],
+            })
+    chart_df = pd.DataFrame(chart_rows)
+    if not chart_df.empty:
+        # Pivot so each token is its own series for st.bar_chart.
+        pivot = chart_df.pivot(index="Date", columns="Token", values="Net (USD)").fillna(0.0)
+        st.bar_chart(pivot, height=280)
+        st.caption(
+            "Bar height per day = net USD flow (withdrawals − deposits). "
+            "Stacked across the 4 macro tokens."
+        )
+
+    with st.expander("Per-day breakdown table", expanded=False):
+        # Long table grouped by token.
+        for sym, rows in macro_flows.items():
+            st.markdown(f"**{sym}**")
+            sym_df = pd.DataFrame(rows).rename(columns={
+                "date": "Date",
+                "deposits_usd": "Deposits (USD)",
+                "withdrawals_usd": "Withdrawals (USD)",
+                "net_usd": "Net (USD)",
+            })
+            st.dataframe(
+                sym_df, hide_index=True, use_container_width=True,
+                column_config={
+                    "Deposits (USD)": st.column_config.NumberColumn(format="$%,.0f"),
+                    "Withdrawals (USD)": st.column_config.NumberColumn(format="$%,.0f"),
+                    "Net (USD)": st.column_config.NumberColumn(format="$%+,.0f"),
+                },
+            )
+
+    if macro_at:
+        from datetime import datetime, timezone as _tz
+        age_min = int((datetime.now(_tz.utc) - macro_at).total_seconds() / 60)
+        st.caption(f"Macro-flow scan: {age_min}m ago. Refreshes every 6 hours.")
+
+st.divider()
+
 st.markdown(
     """
 **Honest limitations:**

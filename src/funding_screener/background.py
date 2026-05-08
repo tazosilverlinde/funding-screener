@@ -39,6 +39,7 @@ from .notifications import (
 from .onchain import (
     EthOnchainClient,
     classify_netflow_signal,
+    compute_daily_netflow_history,
     compute_token_netflow,
     filter_tokens_traded_on_exchanges,
     load_eth_token_contracts,
@@ -71,12 +72,16 @@ class DataStore:
         self.enrichments: dict[tuple[str, str], EnrichmentData] = {}  # (exchange, symbol) → enrichment
         self.stablecoin_supply: dict[str, dict[str, float]] = {}  # macro: USDT/USDC/TOTAL supply
         self.onchain_flows: list[dict] = []  # Per-token 24h exchange netflow
+        # 7-day daily exchange netflow for stables + BTC + ETH (USDT/USDC/WBTC/WETH).
+        # Shape: {symbol: list[{"date": ..., "deposits_usd": ..., "withdrawals_usd": ..., "net_usd": ...}]}
+        self.macro_daily_flows: dict[str, list[dict]] = {}
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
         self.last_enrichment_at: Optional[datetime] = None
         self.last_macro_at: Optional[datetime] = None
         self.last_onchain_at: Optional[datetime] = None
+        self.last_macro_flows_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self.bg_started_at: Optional[datetime] = None
 
@@ -140,6 +145,16 @@ class DataStore:
     def read_onchain_flows(self) -> tuple[list[dict], Optional[datetime]]:
         with self._lock:
             return list(self.onchain_flows), self.last_onchain_at
+
+    def update_macro_daily_flows(self, data: dict[str, list[dict]]) -> None:
+        with self._lock:
+            self.macro_daily_flows = data
+            self.last_macro_flows_at = datetime.now(timezone.utc)
+
+    def read_macro_daily_flows(self) -> tuple[dict[str, list[dict]], Optional[datetime]]:
+        with self._lock:
+            return ({k: list(v) for k, v in self.macro_daily_flows.items()},
+                    self.last_macro_flows_at)
 
     def update_enrichments(self, items: list[EnrichmentData]) -> None:
         with self._lock:
@@ -413,6 +428,69 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
             log.exception("alerts loop error")
             store.record_error(f"alerts: {type(e).__name__}: {e}")
         first_iter = False
+        await asyncio.sleep(interval)
+
+
+async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
+    """7-day daily exchange flows for stables + BTC + ETH — every 6 hours.
+
+    Tokens: USDT, USDC, WBTC (BTC proxy), WETH (ETH proxy).
+    32 RPC calls per cycle (4 tokens × 7 days × 2 dirs ÷ pacing). Sequential to
+    avoid hammering free public RPCs.
+    """
+    interval = 6 * 3600  # 6h
+    macro_tokens = ["USDT", "USDC", "WBTC", "WETH"]
+    exchange_wallets = load_exchange_wallets()
+    contracts = load_eth_token_contracts()
+    if not exchange_wallets or not contracts:
+        log.warning("Macro flow loop disabled — wallet or token YAML missing")
+        return
+
+    # Wait until fast loop has prices.
+    while True:
+        bnb = store.read_binance()
+        if bnb.funding:
+            break
+        await asyncio.sleep(2)
+
+    while True:
+        try:
+            bnb = store.read_binance()
+            mxc = store.read_mexc()
+            price_map: dict[str, float] = {}
+            for r in bnb.funding:
+                if r.quote_asset == "USDT" and r.mark_price:
+                    price_map.setdefault(r.base_asset.upper(), r.mark_price)
+            for r in mxc.funding:
+                if r.quote_asset == "USDT" and r.mark_price:
+                    price_map.setdefault(r.base_asset.upper(), r.mark_price)
+            # Stables ≈ 1.0; WETH gets BTC=...wait, ETH price.
+            price_map.setdefault("USDT", 1.0)
+            price_map.setdefault("USDC", 1.0)
+            # WBTC tracks BTC, WETH tracks ETH.
+            price_map.setdefault("WBTC", price_map.get("BTC", 0.0))
+            price_map.setdefault("WETH", price_map.get("ETH", 0.0))
+
+            macro: dict[str, list[dict]] = {}
+            for sym in macro_tokens:
+                if sym not in contracts:
+                    continue
+                token = contracts[sym]
+                price = price_map.get(sym)
+                if price is None or price <= 0:
+                    continue
+                history = await compute_daily_netflow_history(
+                    eth_client, token, exchange_wallets, days=7, price_usd=price,
+                )
+                if history:
+                    macro[sym] = history
+                # Pause between tokens to be RPC-friendly.
+                await asyncio.sleep(1.0)
+            if macro:
+                store.update_macro_daily_flows(macro)
+        except Exception as e:
+            log.exception("macro flow loop error")
+            store.record_error(f"macro-flow: {type(e).__name__}: {e}")
         await asyncio.sleep(interval)
 
 
@@ -709,6 +787,7 @@ def _runner() -> None:
         loop.create_task(_enrichment_loop(_store, binance, mexc))
         loop.create_task(_macro_loop(_store, llama))
         loop.create_task(_onchain_loop(_store, eth_chain))
+        loop.create_task(_macro_flow_loop(_store, eth_chain))
         loop.create_task(_alerts_loop(_store, telegram))
         loop.run_forever()
     finally:

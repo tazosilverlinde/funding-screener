@@ -289,6 +289,85 @@ async def compute_token_netflow(
     }
 
 
+async def compute_daily_netflow_history(
+    client: EthOnchainClient,
+    token: TokenInfo,
+    exchange_wallets: dict[str, list[str]],
+    days: int,
+    price_usd: Optional[float],
+) -> list[dict]:
+    """Per-day exchange netflow over the last `days` days, oldest first.
+
+    Each list element: {"date": "YYYY-MM-DD", "deposits_usd", "withdrawals_usd", "net_usd"}.
+
+    Sequential queries (2 per day) — `days × 2` calls total. Pacing is gentle to
+    stay under public-RPC limits, so a 7-day fetch takes ~10–20 seconds.
+    """
+    if price_usd is None or price_usd <= 0:
+        return []
+
+    padded_all: list[str] = []
+    wallet_to_exchange: dict[str, str] = {}
+    for exchange, wallets in exchange_wallets.items():
+        for w in wallets:
+            wal = w.lower()
+            padded_all.append(_pad_address(wal))
+            wallet_to_exchange[wal] = exchange
+    if not padded_all:
+        return []
+
+    try:
+        latest = await client.get_block_number()
+    except Exception as e:
+        _log.warning("daily history block-number fetch failed for %s: %s", token.symbol, e)
+        return []
+
+    out: list[dict] = []
+    for day_offset in range(days, 0, -1):
+        # day_offset=days → oldest day; day_offset=1 → today.
+        from_block = max(0, latest - day_offset * _BLOCKS_PER_24H)
+        to_block = max(0, latest - (day_offset - 1) * _BLOCKS_PER_24H)
+        try:
+            deposits_logs = await client.get_transfer_logs(
+                token.address, from_block, to_block, to_topic_filter=padded_all,
+            )
+            await asyncio.sleep(0.3)
+            withdrawals_logs = await client.get_transfer_logs(
+                token.address, from_block, to_block, from_topic_filter=padded_all,
+            )
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            _log.warning("daily history RPC failed for %s day -%d: %s", token.symbol, day_offset, e)
+            continue
+
+        deposits_total = 0.0
+        withdrawals_total = 0.0
+        for log_entry in deposits_logs:
+            from_addr, to_addr, amount = parse_transfer_log(log_entry, token.decimals)
+            if from_addr in wallet_to_exchange:  # internal exchange shuffle
+                continue
+            if to_addr in wallet_to_exchange:
+                deposits_total += amount * price_usd
+        for log_entry in withdrawals_logs:
+            from_addr, to_addr, amount = parse_transfer_log(log_entry, token.decimals)
+            if to_addr in wallet_to_exchange:
+                continue
+            if from_addr in wallet_to_exchange:
+                withdrawals_total += amount * price_usd
+
+        # Date label = end of this 24h window (closest to "today").
+        from datetime import datetime as _dt, timedelta, timezone as _tz
+        day_label = (_dt.now(_tz.utc) - timedelta(days=day_offset - 1)).date().isoformat()
+
+        out.append({
+            "date": day_label,
+            "deposits_usd": deposits_total,
+            "withdrawals_usd": withdrawals_total,
+            "net_usd": withdrawals_total - deposits_total,
+        })
+    return out
+
+
 def classify_netflow_signal(net_usd: float, total_usd: float) -> tuple[str, str]:
     """(emoji, short label) based on net flow vs absolute volume.
 
