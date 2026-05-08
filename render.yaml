@@ -1,0 +1,34 @@
+# Render.com deployment blueprint.
+# Why Render: Streamlit Community Cloud is on AWS US-east, which Binance
+# blocks with HTTP 451. Render's Frankfurt region gives an EU IP that
+# Binance allows, so both Binance and MEXC fetches work end-to-end.
+#
+# To deploy:
+#   1. Sign up at https://render.com (free, no card required for the free tier).
+#   2. Connect GitHub.
+#   3. Click "New" → "Blueprint" → pick this repo.
+#   4. Render reads this file and provisions the service automatically.
+#
+# Free-tier specifics:
+#   - 512 MB RAM (more than enough)
+#   - Sleeps after 15 min of inactivity; cold start ~30-60s on next visit
+#   - 750 build hours/month
+#   - Auto-redeploys on every `git push` to main
+
+services:
+  - type: web
+    name: funding-screener
+    runtime: python
+    region: frankfurt
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: BINANCE_ENABLED
+        value: "true"
+      - key: MEXC_ENABLED
+        value: "true"
