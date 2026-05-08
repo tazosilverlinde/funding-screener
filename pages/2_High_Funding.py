@@ -74,6 +74,7 @@ onchain_by_base: dict[str, float] = {f["token"]: f.get("net_usd", 0.0) for f in 
 combined_klines: dict = {}
 combined_klines.update(binance.klines)
 combined_klines.update(mexc.klines)
+score_histories = store.read_score_histories()
 rows = screen_combined_high_funding(
     binance.funding,
     mexc.funding,
@@ -86,6 +87,7 @@ rows = screen_combined_high_funding(
     min_volume_usd_per_side=min_volume_per_side,
     onchain_netflow_by_base=onchain_by_base,
     klines_by_symbol=combined_klines,
+    score_histories=score_histories,
 )
 
 # Apply sector filter on the *row* set before truncation so sector picks
@@ -98,6 +100,7 @@ df = to_df(
     [r.model_dump() for r in rows[:cap]],
     column_order=[
         "composite_score",
+        "composite_score_delta_1h",
         "composite_emoji",
         "composite_short",
         "signal_emoji",
@@ -132,17 +135,20 @@ df = to_df(
 )
 
 if not df.empty:
-    # Composite Score column.
+    # Composite Score column + 1h delta.
     df["Score"] = df["composite_score"]
+    df["Δ 1h"] = df["composite_score_delta_1h"]
     df["Score label"] = (
         df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
     )
-    df = df.drop(columns=["composite_score", "composite_emoji", "composite_short"])
+    df = df.drop(columns=[
+        "composite_score", "composite_score_delta_1h", "composite_emoji", "composite_short",
+    ])
     # Combine emoji + short label into one cell for compact display.
     df["Signal"] = df["signal_emoji"].fillna("") + " " + df["signal_short"].fillna("")
     df = df.drop(columns=["signal_emoji", "signal_short"])
-    # Move Score + Signal to the front.
-    front = ["Score", "Score label", "Signal"]
+    # Move Score / Δ / Signal to the front.
+    front = ["Score", "Δ 1h", "Score label", "Signal"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -206,6 +212,18 @@ if not df.empty:
                 "  -30 .. -10  → ↘ Mild bear\n"
                 "  -70 .. -30  → 🔴 Bearish\n"
                 "  -100 .. -70 → 💥 Strong bear"
+            ),
+        ),
+        "Δ 1h": st.column_config.NumberColumn(
+            "Δ 1h",
+            format="%+d",
+            help=(
+                "Composite score change in the last ~hour, computed from in-memory snapshots "
+                "taken every 10 minutes (so ~6 samples per hour).\n\n"
+                "Big positive Δ on a row that's still neutral overall is the **most actionable** "
+                "kind of signal — momentum is shifting in real time. Big negative Δ on a "
+                "previously-strong row warns that the move is rolling over.\n\n"
+                "Empty when not enough history yet (fresh deploy or restart)."
             ),
         ),
         "Score label": st.column_config.TextColumn(

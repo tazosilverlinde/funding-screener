@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
+from datetime import datetime
+
 from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow, Kline
+from ..score_history import score_delta as _score_delta
 from ..sectors import sector_for
 from ..signals import classify_signal, compute_composite_score, compute_realized_volatility
 
@@ -50,6 +53,7 @@ def screen_combined_high_funding(
     min_volume_usd_per_side: float = 0.0,
     onchain_netflow_by_base: Optional[dict[str, float]] = None,
     klines_by_symbol: Optional[dict[str, list[Kline]]] = None,
+    score_histories: Optional[dict[tuple[str, str], list[tuple[datetime, int]]]] = None,
 ) -> list[CombinedFundingRow]:
     bnb = _index_by_base_quote(binance_rows)
     mxc = _index_by_base_quote(mexc_rows)
@@ -59,6 +63,7 @@ def screen_combined_high_funding(
     mexc_volumes = mexc_volumes or {}
     onchain_netflow_by_base = onchain_netflow_by_base or {}
     klines_by_symbol = klines_by_symbol or {}
+    score_histories = score_histories or {}
     keys = set(bnb.keys()) | set(mxc.keys())
 
     out: list[CombinedFundingRow] = []
@@ -191,6 +196,9 @@ def screen_combined_high_funding(
                 composite_emoji=composite.emoji,
                 composite_short=composite.short,
                 composite_breakdown="\n".join(composite.breakdown),
+                composite_score_delta_1h=_score_delta(
+                    score_histories.get((base, quote)) or [], minutes_ago=60
+                ),
                 realized_vol_30d_pct=vol_30d,
                 funding_per_vol=funding_per_vol,
             )

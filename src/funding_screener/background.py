@@ -47,6 +47,7 @@ from .onchain import (
     load_non_whale_addresses,
     _BLOCKS_PER_24H,
 )
+from .score_history import trim_old as _trim_history
 from .screener.combined_high_funding import screen_combined_high_funding
 from .signals import compute_funding_streak
 from .unlocks import load_upcoming_unlocks
@@ -76,6 +77,9 @@ class DataStore:
         # 7-day daily exchange netflow for stables + BTC + ETH (USDT/USDC/WBTC/WETH).
         # Shape: {symbol: list[{"date": ..., "deposits_usd": ..., "withdrawals_usd": ..., "net_usd": ...}]}
         self.macro_daily_flows: dict[str, list[dict]] = {}
+        # Composite-score history per (base_asset, quote_asset), trimmed to last 24h.
+        # Each value is a list of (timestamp_utc, score_int) tuples in chronological order.
+        self.score_history: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -83,6 +87,7 @@ class DataStore:
         self.last_macro_at: Optional[datetime] = None
         self.last_onchain_at: Optional[datetime] = None
         self.last_macro_flows_at: Optional[datetime] = None
+        self.last_score_snapshot_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self.bg_started_at: Optional[datetime] = None
 
@@ -156,6 +161,27 @@ class DataStore:
         with self._lock:
             return ({k: list(v) for k, v in self.macro_daily_flows.items()},
                     self.last_macro_flows_at)
+
+    def snapshot_scores(self, scores_by_key: dict[tuple[str, str], int]) -> None:
+        """Append a (now, score) entry per (base, quote) and trim to 24h."""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            for key, score in scores_by_key.items():
+                history = self.score_history.setdefault(key, [])
+                history.append((now, int(score)))
+                # Trim in-place to keep the buffer bounded.
+                self.score_history[key] = _trim_history(history, now)
+            # Drop stale (key, []) pairs that may exist from a previous bigger universe.
+            self.score_history = {k: v for k, v in self.score_history.items() if v}
+            self.last_score_snapshot_at = now
+
+    def read_score_histories(self) -> dict[tuple[str, str], list[tuple[datetime, int]]]:
+        with self._lock:
+            return {k: list(v) for k, v in self.score_history.items()}
+
+    def read_score_history(self, key: tuple[str, str]) -> list[tuple[datetime, int]]:
+        with self._lock:
+            return list(self.score_history.get(key, []))
 
     def update_enrichments(self, items: list[EnrichmentData]) -> None:
         with self._lock:
@@ -429,6 +455,59 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
             log.exception("alerts loop error")
             store.record_error(f"alerts: {type(e).__name__}: {e}")
         first_iter = False
+        await asyncio.sleep(interval)
+
+
+async def _score_history_loop(store: DataStore) -> None:
+    """Snapshot composite scores for every (base, quote) every 10 minutes.
+
+    Drives the "Score Δ 1h" column on Page 2 and the "Top movers" section on
+    the landing page. In-memory only — process restart wipes history; signal
+    recovers within one snapshot cycle.
+    """
+    interval = 600  # 10 min — fast enough to catch hourly movement, slow enough to be cheap
+    # Wait for fast loop to populate funding before first snapshot.
+    while True:
+        bnb = store.read_binance()
+        mxc = store.read_mexc()
+        if bnb.funding or mxc.funding:
+            break
+        await asyncio.sleep(2)
+
+    while True:
+        try:
+            bnb = store.read_binance()
+            mxc = store.read_mexc()
+            enrichments = store.read_enrichments()
+            onchain_flows, _ = store.read_onchain_flows()
+            onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
+            combined_klines: dict = {}
+            combined_klines.update(bnb.klines)
+            combined_klines.update(mxc.klines)
+            # Threshold = 0 means we evaluate every (base, quote) pair, not just
+            # the high-funding ones. We need history for everything to surface
+            # mid-pack movers ("from 5 → 35 in 1h" matters more than "+85 → +90").
+            rows = screen_combined_high_funding(
+                bnb.funding, mxc.funding,
+                bnb.contracts, mxc.contracts,
+                enrichments,
+                threshold_percent=0.0,
+                binance_volumes=bnb.volumes,
+                mexc_volumes=mxc.volumes,
+                min_volume_usd_per_side=0.0,
+                onchain_netflow_by_base=onchain_by_base,
+                klines_by_symbol=combined_klines,
+            )
+            scores: dict[tuple[str, str], int] = {}
+            for r in rows:
+                if r.composite_score is None:
+                    continue
+                scores[(r.base_asset, r.quote_asset)] = r.composite_score
+            if scores:
+                store.snapshot_scores(scores)
+        except Exception as e:
+            log.exception("score history loop error")
+            store.record_error(f"score-history: {type(e).__name__}: {e}")
         await asyncio.sleep(interval)
 
 
@@ -792,6 +871,7 @@ def _runner() -> None:
         loop.create_task(_macro_loop(_store, llama))
         loop.create_task(_onchain_loop(_store, eth_chain))
         loop.create_task(_macro_flow_loop(_store, eth_chain))
+        loop.create_task(_score_history_loop(_store))
         loop.create_task(_alerts_loop(_store, telegram))
         loop.run_forever()
     finally:

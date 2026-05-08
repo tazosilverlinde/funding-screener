@@ -96,6 +96,49 @@ c2.metric("MEXC perps", len(mxc.contracts))
 c3.metric("Binance klines cached", len(bnb.klines))
 c4.metric("MEXC klines cached", len(mxc.klines))
 
+## ---- top movers ---- (biggest 1-hour score changes across all tracked pairs)
+from funding_screener.score_history import top_movers as _top_movers  # noqa: E402
+
+_histories = store.read_score_histories()
+_risers, _fallers = _top_movers(_histories, minutes_ago=60, limit=5)
+if _risers or _fallers:
+    st.subheader("Top movers — last hour")
+    st.caption(
+        "Pairs whose composite score moved the most in the last hour. Risers are pairs "
+        "where bullish signals built up rapidly; fallers are pairs that lost conviction. "
+        "Computed from snapshots taken every 10 minutes (in-memory only — wipes on restart)."
+    )
+    mc1, mc2 = st.columns(2)
+    if _risers:
+        mc1.markdown("**🚀 Risers (score going up)**")
+        rdf = pd.DataFrame(_risers).rename(columns={
+            "base_asset": "Base", "quote_asset": "Quote",
+            "current_score": "Score", "delta": "Δ 1h",
+        })
+        mc1.dataframe(
+            rdf, hide_index=True, use_container_width=True,
+            column_config={
+                "Score": st.column_config.NumberColumn(format="%+d"),
+                "Δ 1h": st.column_config.NumberColumn(format="%+d"),
+            },
+        )
+    if _fallers:
+        mc2.markdown("**💥 Fallers (score going down)**")
+        fdf = pd.DataFrame(_fallers).rename(columns={
+            "base_asset": "Base", "quote_asset": "Quote",
+            "current_score": "Score", "delta": "Δ 1h",
+        })
+        mc2.dataframe(
+            fdf, hide_index=True, use_container_width=True,
+            column_config={
+                "Score": st.column_config.NumberColumn(format="%+d"),
+                "Δ 1h": st.column_config.NumberColumn(format="%+d"),
+            },
+        )
+
+st.divider()
+
+
 ## ---- sector rotation summary -------------------------------------------------
 ## Quick read on which sectors are currently bullish vs bearish in aggregate.
 ## Computed live from the same combined-screener output Page 2 uses, so what's

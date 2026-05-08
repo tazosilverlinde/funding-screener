@@ -142,6 +142,9 @@ class CombinedFundingRow(_Frozen):
     composite_emoji: Optional[str] = None
     composite_short: Optional[str] = None
     composite_breakdown: Optional[str] = None  # newline-joined breakdown text
+    # Hour-over-hour score change (current minus closest sample to 1h ago).
+    # None when fewer than 2 history samples or drift > 50% off target.
+    composite_score_delta_1h: Optional[int] = None
 
 
 class PriceRiseRow(_Frozen):
