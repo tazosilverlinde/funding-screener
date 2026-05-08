@@ -24,6 +24,13 @@ alerts:
     bullish_threshold: 70   # alert when score >= 70
     bearish_threshold: -70  # alert when score <= -70
 
+  # Score-Δ-jump alert — fires when the 1h score change is large in either
+  # direction. Catches "ARB just rallied 40 score points in an hour" before
+  # the absolute score crosses the extreme threshold above.
+  composite_score_delta:
+    enabled: true
+    abs_threshold: 25       # alert when |score Δ 1h| >= this
+
   # Funding rate crossing absolute threshold (8h-normalized).
   funding_rate:
     enabled: true

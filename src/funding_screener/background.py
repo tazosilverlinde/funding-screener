@@ -32,6 +32,7 @@ from .notifications import (
     evaluate_composite_alerts,
     evaluate_funding_alerts,
     evaluate_new_listing_alerts,
+    evaluate_score_delta_alerts,
     evaluate_unlock_alerts,
     evaluate_whale_flow_alerts,
     load_alerts_config,
@@ -395,6 +396,7 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
             try:
                 screener_threshold = 0.0  # don't pre-filter for alert evaluation
                 onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
+                histories_for_alerts = store.read_score_histories()
                 combined_rows = screen_combined_high_funding(
                     bnb.funding, mxc.funding,
                     bnb.contracts, mxc.contracts,
@@ -403,6 +405,7 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     binance_volumes=bnb.volumes, mexc_volumes=mxc.volumes,
                     min_volume_usd_per_side=0.0,
                     onchain_netflow_by_base=onchain_by_base,
+                    score_histories=histories_for_alerts,
                 )
                 if cfg.get("composite_score", {}).get("enabled", True):
                     cs = cfg["composite_score"]
@@ -410,6 +413,12 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                         combined_rows,
                         bull_threshold=int(cs.get("bullish_threshold", 70)),
                         bear_threshold=int(cs.get("bearish_threshold", -70)),
+                    ))
+                if cfg.get("composite_score_delta", {}).get("enabled", True):
+                    sd = cfg["composite_score_delta"]
+                    events.extend(evaluate_score_delta_alerts(
+                        combined_rows,
+                        abs_threshold=int(sd.get("abs_threshold", 25)),
                     ))
             except Exception as e:
                 log.warning("alerts: composite evaluator failed: %s", e)

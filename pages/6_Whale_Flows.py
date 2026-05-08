@@ -180,8 +180,23 @@ st.caption(
     "in 24h gets counted."
 )
 
+# Conviction filter — single whale moves can be one wallet's idiosyncratic
+# behaviour and shouldn't show as a "signal". Default to 2 distinct whales for
+# conviction; user can tighten or loosen via the slider.
+min_whales = st.slider(
+    "Conviction filter — minimum distinct whale addresses",
+    min_value=1, max_value=10, value=2, step=1,
+    help=(
+        "Drop tokens where fewer than this many DISTINCT non-excluded addresses "
+        "transacted with exchanges. With min=1 you see every flagged token, but "
+        "single-whale rows can be one wallet's idiosyncratic move (not a cohort signal). "
+        "Default 2 = 'at least two independent whales agree on direction'."
+    ),
+)
+
 # Pull whale subset from the same flows we already loaded above.
 whale_rows = []
+filtered_low_conviction = 0
 for r in flows:
     wn = r.get("whale_net_usd", 0.0) or 0.0
     wd = r.get("whale_deposits_usd", 0.0) or 0.0
@@ -189,6 +204,9 @@ for r in flows:
     wcount = r.get("whale_unique_count", 0) or 0
     if wcount == 0 and wd == 0 and ww == 0:
         continue  # nothing whale-class for this token
+    if wcount < min_whales:
+        filtered_low_conviction += 1
+        continue  # below conviction threshold
     # Signal classification — same heuristic as the broader netflow.
     emoji, short = ("🟢", "Whale accumulation") if wn > 0 else (
         ("🔴", "Whale distribution") if wn < 0 else ("🟡", "Mixed")
@@ -245,9 +263,14 @@ else:
         },
     )
     n_distinct_whales = sum(r["Unique whales"] for r in whale_rows)
+    suffix = (
+        f" — {filtered_low_conviction} additional tokens with <{min_whales} whales "
+        f"hidden by conviction filter."
+        if filtered_low_conviction > 0 else ""
+    )
     st.caption(
         f"{len(whale_df)} tokens with whale activity in 24h, "
-        f"{n_distinct_whales} distinct whale addresses involved across all tokens."
+        f"{n_distinct_whales} distinct whale addresses involved across all tokens" + suffix
     )
 
 # ---------------- 7-day daily flows for stables + BTC + ETH ----------------

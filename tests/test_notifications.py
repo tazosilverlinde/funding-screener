@@ -114,3 +114,49 @@ def test_composite_alert_skips_none_score():
     row = _FakeCombined("X", "USDT", "XUSDT", None, None, None, None, None)
     out = evaluate_composite_alerts([row], bull_threshold=70, bear_threshold=-70)
     assert out == []
+
+
+# ---------------- evaluate_score_delta_alerts ----------------
+
+
+@dataclass
+class _FakeRowWithDelta:
+    base_asset: str
+    quote_asset: str
+    binance_symbol: Optional[str]
+    mexc_symbol: Optional[str]
+    composite_score: Optional[int]
+    composite_emoji: Optional[str]
+    composite_short: Optional[str]
+    composite_score_delta_1h: Optional[int]
+
+
+def test_score_delta_alert_fires_on_big_jump():
+    from funding_screener.notifications import evaluate_score_delta_alerts
+    row = _FakeRowWithDelta("ARB", "USDT", "ARBUSDT", None, 60, "🟢", "Bullish", 35)
+    out = evaluate_score_delta_alerts([row], abs_threshold=25)
+    assert out[0][1] == "active"
+    assert "surging" in out[0][2]
+    assert "ARBUSDT" in out[0][2]
+
+
+def test_score_delta_alert_negative_direction():
+    from funding_screener.notifications import evaluate_score_delta_alerts
+    row = _FakeRowWithDelta("PEPE", "USDT", "PEPEUSDT", None, -40, "🔴", "Bearish", -30)
+    out = evaluate_score_delta_alerts([row], abs_threshold=25)
+    assert out[0][1] == "active"
+    assert "plunging" in out[0][2]
+
+
+def test_score_delta_alert_resolved_when_below_threshold():
+    from funding_screener.notifications import evaluate_score_delta_alerts
+    row = _FakeRowWithDelta("X", "USDT", "XUSDT", None, 50, "🟢", "Bullish", 5)
+    out = evaluate_score_delta_alerts([row], abs_threshold=25)
+    assert out[0][1] == "resolved"
+
+
+def test_score_delta_alert_skips_none_delta():
+    from funding_screener.notifications import evaluate_score_delta_alerts
+    row = _FakeRowWithDelta("X", "USDT", "XUSDT", None, 50, "🟢", "Bullish", None)
+    out = evaluate_score_delta_alerts([row], abs_threshold=25)
+    assert out == []

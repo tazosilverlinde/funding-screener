@@ -158,6 +158,33 @@ def evaluate_composite_alerts(combined_rows, bull_threshold: int, bear_threshold
     return out
 
 
+def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple[str, str, str]]:
+    """Score-Δ-jump alert — fires when 1h score change is large in either direction.
+
+    Catches momentum shifts BEFORE the absolute score crosses the extremes:
+    a row that just went from +20 to +60 in 1h is more interesting than one
+    that's been at +75 stable for hours.
+    """
+    out: list[tuple[str, str, str]] = []
+    for r in combined_rows:
+        delta = getattr(r, "composite_score_delta_1h", None)
+        if delta is None:
+            continue
+        key = f"score_delta:{r.base_asset}/{r.quote_asset}"
+        if abs(delta) >= abs_threshold:
+            sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+            arrow = "🚀 surging" if delta > 0 else "💥 plunging"
+            msg = (
+                f"{arrow} *{sym}* — composite score Δ `{delta:+d}` in last 1h\n"
+                f"Current: `{r.composite_score:+d}` ({r.composite_emoji} {r.composite_short})\n"
+                "Momentum shifting fast — check what triggered it."
+            )
+            out.append((key, "active", msg))
+        else:
+            out.append((key, "resolved", f"📊 {r.base_asset}/{r.quote_asset} score Δ back below threshold."))
+    return out
+
+
 def evaluate_whale_flow_alerts(onchain_flows: list[dict], threshold_usd: float) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for flow in onchain_flows:
