@@ -96,6 +96,80 @@ c2.metric("MEXC perps", len(mxc.contracts))
 c3.metric("Binance klines cached", len(bnb.klines))
 c4.metric("MEXC klines cached", len(mxc.klines))
 
+## ---- sector rotation summary -------------------------------------------------
+## Quick read on which sectors are currently bullish vs bearish in aggregate.
+## Computed live from the same combined-screener output Page 2 uses, so what's
+## on Page 2 drives what shows here.
+from funding_screener.sectors import sector_aggregates  # noqa: E402
+from funding_screener.screener import screen_combined_high_funding  # noqa: E402
+import pandas as pd  # noqa: E402
+
+bnb_for_sector = store.read_binance()
+mxc_for_sector = store.read_mexc()
+_enrichments = store.read_enrichments()
+_onchain_flows, _ = store.read_onchain_flows()
+_onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in _onchain_flows}
+_combined_klines: dict = {}
+_combined_klines.update(bnb_for_sector.klines)
+_combined_klines.update(mxc_for_sector.klines)
+_combined_rows = screen_combined_high_funding(
+    bnb_for_sector.funding, mxc_for_sector.funding,
+    bnb_for_sector.contracts, mxc_for_sector.contracts,
+    _enrichments,
+    threshold_percent=0.0,  # no threshold so sector aggregates see every symbol
+    binance_volumes=bnb_for_sector.volumes,
+    mexc_volumes=mxc_for_sector.volumes,
+    min_volume_usd_per_side=0.0,
+    onchain_netflow_by_base=_onchain_by_base,
+    klines_by_symbol=_combined_klines,
+)
+_sector_rows = sector_aggregates(_combined_rows)
+if _sector_rows:
+    st.subheader("Sector rotation — average composite score per category")
+    st.caption(
+        "Aggregates composite signal scores across every tracked symbol in each sector. "
+        "**Avg** > 30 = the sector is bullish overall; < −30 = bearish. "
+        "**Bullish/bearish counts** = rows with score ≥ ±30. Sectors with the most "
+        "extreme aggregates are usually where money's rotating in/out."
+    )
+    sec_df = pd.DataFrame(_sector_rows)
+    sec_df["Avg label"] = sec_df["avg_score"].apply(
+        lambda s: "🚀 Strong bull" if s >= 70 else
+                  "🟢 Bullish" if s >= 30 else
+                  "↗ Mild bull" if s >= 10 else
+                  "🟡 Neutral" if s > -10 else
+                  "↘ Mild bear" if s > -30 else
+                  "🔴 Bearish" if s > -70 else
+                  "💥 Strong bear"
+    )
+    sec_df = sec_df.rename(columns={
+        "sector": "Sector",
+        "row_count": "Tokens",
+        "avg_score": "Avg score",
+        "median_score": "Median",
+        "bullish_count": "Bullish (≥+30)",
+        "bearish_count": "Bearish (≤-30)",
+        "sample_symbols": "Strongest signals",
+    })
+    sec_df = sec_df[[
+        "Sector", "Avg label", "Avg score", "Median",
+        "Bullish (≥+30)", "Bearish (≤-30)", "Tokens", "Strongest signals",
+    ]]
+    st.dataframe(
+        sec_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Avg score": st.column_config.NumberColumn(format="%+.1f"),
+            "Median": st.column_config.NumberColumn(format="%+d"),
+            "Bullish (≥+30)": st.column_config.NumberColumn(format="%d"),
+            "Bearish (≤-30)": st.column_config.NumberColumn(format="%d"),
+            "Tokens": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+st.divider()
+
 with st.expander("Configuration", expanded=False):
     st.write("**Settings (`config/settings.yaml`)**")
     st.json(settings(), expanded=False)
