@@ -64,6 +64,10 @@ mexc = store.read_mexc()
 enrichments = store.read_enrichments()
 onchain_flows, _ = store.read_onchain_flows()
 onchain_by_base: dict[str, float] = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
+# Combine Binance + MEXC kline maps so vol can be computed for either side.
+combined_klines: dict = {}
+combined_klines.update(binance.klines)
+combined_klines.update(mexc.klines)
 rows = screen_combined_high_funding(
     binance.funding,
     mexc.funding,
@@ -75,6 +79,7 @@ rows = screen_combined_high_funding(
     mexc_volumes=mexc.volumes,
     min_volume_usd_per_side=min_volume_per_side,
     onchain_netflow_by_base=onchain_by_base,
+    klines_by_symbol=combined_klines,
 )
 
 cap = int(cfg["row_limit"])
@@ -100,6 +105,8 @@ df = to_df(
         "binance_ls_ratio_global",
         "binance_ls_ratio_top",
         "binance_volume_24h_millions",
+        "realized_vol_30d_pct",
+        "funding_per_vol",
         "mexc_symbol",
         "mexc_rate_percent",
         "mexc_rate_8h_norm_percent",
@@ -154,6 +161,8 @@ if not df.empty:
             "binance_ls_ratio_global": "Bnb L/S retail",
             "binance_ls_ratio_top": "Bnb L/S top",
             "binance_volume_24h_millions": "Bnb 24h vol (M)",
+            "realized_vol_30d_pct": "30d vol %",
+            "funding_per_vol": "Funding / vol",
             "mexc_symbol": "MEXC symbol",
             "mexc_rate_percent": "MXC rate %/period",
             "mexc_rate_8h_norm_percent": "MXC % / 8h",
@@ -325,6 +334,23 @@ if not df.empty:
                 "Compare to L/S retail — when top traders disagree with retail, it's a smart-vs-dumb-money signal:\n"
                 "  • Top short + retail long → smart money positioned against retail (bearish bias)\n"
                 "  • Top long + retail short → smart money positioned against retail (bullish bias)"
+            ),
+        ),
+        "30d vol %": st.column_config.NumberColumn(
+            format="%.1f",
+            help=(
+                "Annualized 30-day realized volatility (%), computed from daily kline closes.\n"
+                "BTC ≈ 30-50% / blue chips ≈ 50-80% / mid-caps ≈ 80-150% / memes 200%+.\n"
+                "High funding paired with HIGH vol means the funding edge is being eaten by price risk."
+            ),
+        ),
+        "Funding / vol": st.column_config.NumberColumn(
+            format="%.4f",
+            help=(
+                "Signed ratio: 8h-normalized funding rate ÷ realized 30-day vol (decimal).\n"
+                "Positive = longs pay; negative = shorts pay. Bigger magnitude = more attractive funding "
+                "*relative to volatility risk*. Use this to rank cross-symbol — it removes the bias where "
+                "high-vol meme coins show high funding just because vol is high."
             ),
         ),
         "MXC 24h vol (M)": st.column_config.NumberColumn(

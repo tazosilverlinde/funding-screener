@@ -297,6 +297,34 @@ def compute_composite_score(
     )
 
 
+def compute_realized_volatility(klines: list, days: int = 30) -> Optional[float]:
+    """Annualized realized volatility (in percent) from the last `days` daily closes.
+
+    Standard formula: stddev(log returns) * sqrt(365) * 100. Returns None when
+    fewer than 5 daily closes are available — that's not enough sample to be
+    meaningful.
+    """
+    import math
+    import statistics
+
+    if not klines or len(klines) < 5:
+        return None
+    closes: list[float] = [k.close for k in klines[-(days + 1):] if k.close > 0]
+    if len(closes) < 5:
+        return None
+    log_returns: list[float] = []
+    for i in range(1, len(closes)):
+        prev = closes[i - 1]
+        cur = closes[i]
+        if prev <= 0 or cur <= 0:
+            continue
+        log_returns.append(math.log(cur / prev))
+    if len(log_returns) < 4:
+        return None
+    sigma = statistics.stdev(log_returns)
+    return sigma * math.sqrt(365) * 100.0
+
+
 def _composite_label(score: int) -> tuple[str, str, str]:
     """Map score → (emoji, short label, color). Symmetric around zero."""
     if score >= 70:

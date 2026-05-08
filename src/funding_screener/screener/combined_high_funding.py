@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow
-from ..signals import classify_signal, compute_composite_score
+from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow, Kline
+from ..signals import classify_signal, compute_composite_score, compute_realized_volatility
 
 _QUOTES = ("USDT", "USDC")
 
@@ -48,6 +48,7 @@ def screen_combined_high_funding(
     mexc_volumes: Optional[dict[str, float]] = None,
     min_volume_usd_per_side: float = 0.0,
     onchain_netflow_by_base: Optional[dict[str, float]] = None,
+    klines_by_symbol: Optional[dict[str, list[Kline]]] = None,
 ) -> list[CombinedFundingRow]:
     bnb = _index_by_base_quote(binance_rows)
     mxc = _index_by_base_quote(mexc_rows)
@@ -56,6 +57,7 @@ def screen_combined_high_funding(
     binance_volumes = binance_volumes or {}
     mexc_volumes = mexc_volumes or {}
     onchain_netflow_by_base = onchain_netflow_by_base or {}
+    klines_by_symbol = klines_by_symbol or {}
     keys = set(bnb.keys()) | set(mxc.keys())
 
     out: list[CombinedFundingRow] = []
@@ -139,6 +141,20 @@ def screen_combined_high_funding(
         b_vol = binance_volumes.get(b.symbol) if b else None
         m_vol = mexc_volumes.get(m.symbol) if m else None
 
+        # Realized 30-day volatility from cached daily klines (Binance preferred,
+        # MEXC as fallback). Used for the signed Funding/Vol ratio.
+        klines_for_vol: Optional[list[Kline]] = None
+        if b and b.symbol in klines_by_symbol:
+            klines_for_vol = klines_by_symbol[b.symbol]
+        elif m and m.symbol in klines_by_symbol:
+            klines_for_vol = klines_by_symbol[m.symbol]
+        vol_30d = compute_realized_volatility(klines_for_vol or [], days=30) if klines_for_vol else None
+        # Pick the sided funding rate to compute the ratio against (the same one
+        # the signal logic used).
+        funding_per_vol: Optional[float] = None
+        if vol_30d is not None and vol_30d > 0 and sig_funding is not None:
+            funding_per_vol = sig_funding / (vol_30d / 100.0)
+
         out.append(
             CombinedFundingRow(
                 base_asset=base,
@@ -173,6 +189,8 @@ def screen_combined_high_funding(
                 composite_emoji=composite.emoji,
                 composite_short=composite.short,
                 composite_breakdown="\n".join(composite.breakdown),
+                realized_vol_30d_pct=vol_30d,
+                funding_per_vol=funding_per_vol,
             )
         )
     out.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)

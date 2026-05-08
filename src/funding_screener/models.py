@@ -115,6 +115,8 @@ class CombinedFundingRow(_Frozen):
     binance_oi_change_24h_pct: Optional[float] = None      # open interest 24h Δ%
     binance_ls_ratio_global: Optional[float] = None        # retail account long/short
     binance_ls_ratio_top: Optional[float] = None           # top-trader long/short
+    realized_vol_30d_pct: Optional[float] = None           # annualized 30d vol from daily klines
+    funding_per_vol: Optional[float] = None                # signed: funding_8h_norm / (vol/100)
 
     mexc_symbol: Optional[str]
     mexc_rate_percent: Optional[float]

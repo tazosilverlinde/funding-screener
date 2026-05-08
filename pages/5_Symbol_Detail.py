@@ -31,7 +31,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from funding_screener.exchanges import BinanceClient  # noqa: E402
+from funding_screener.exchanges import BinanceClient, MexcClient  # noqa: E402
 from funding_screener.signals import classify_signal, compute_composite_score  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
@@ -134,6 +134,23 @@ if exchange == "Binance":
     extras = _binance_extras(symbol_q)
 else:
     extras = {"oi_history": [], "ls_global": None, "ls_top": None}
+
+
+# Fetch a longer funding-rate history (90 settlements ≈ 30 days at 8h cadence)
+# for the line chart. Cached for 5 min per (exchange, symbol) so revisiting is instant.
+@st.cache_data(ttl=300, show_spinner=False)
+def _funding_history(exchange: str, symbol: str, limit: int = 90) -> list[float]:
+    async def _go():
+        client = BinanceClient() if exchange == "Binance" else MexcClient()
+        try:
+            return await client.fetch_funding_rate_history(symbol, limit=limit)
+        finally:
+            await client.aclose()
+
+    return run_async(_go)
+
+
+funding_history_pct = _funding_history(exchange, symbol_q, limit=90)
 
 
 # ---------------- compute top-line numbers ----------------
@@ -250,11 +267,36 @@ if funding_row:
     else:
         f5.metric("Streak", "pending", help="Waiting for enrichment loop to fetch funding history…")
 
-    if enrichment and enrichment.prev_funding_rates_percent:
-        st.write("**Last settled rates** (most-recent first):")
+    # 30-day funding history line chart (replaces the small last-3-rates table).
+    if funding_history_pct:
+        # API returns most-recent first; reverse so the chart x-axis goes oldest → newest.
+        hist = list(reversed(funding_history_pct))
+        chart_df = pd.DataFrame(
+            {
+                "Settlement": list(range(-len(hist) + 1, 1)),  # negative → past
+                "Rate %": hist,
+            }
+        ).set_index("Settlement")
+        st.write(
+            f"**Funding history — last {len(hist)} settlements** "
+            f"(≈ {len(hist) // 3} days at the typical 8h cadence)"
+        )
+        st.line_chart(chart_df, height=200)
+        # Stats below the chart so user can quickly read magnitude/persistence.
+        avg = sum(hist) / len(hist)
+        positives = sum(1 for r in hist if r > 0)
+        negatives = sum(1 for r in hist if r < 0)
+        c_avg, c_pos, c_neg, c_max = st.columns(4)
+        c_avg.metric("Average", f"{avg:+.4f}%")
+        c_pos.metric("Positive periods", positives)
+        c_neg.metric("Negative periods", negatives)
+        c_max.metric("Max abs", f"{max(abs(r) for r in hist):.4f}%")
+    elif enrichment and enrichment.prev_funding_rates_percent:
+        # Fallback: fewer rates from the enrichment cache.
+        st.write("**Last settled rates** (most-recent first, fallback view):")
         hist_df = pd.DataFrame(
             {
-                "Period (most-recent → older)": [f"t-{i+1}" for i in range(len(enrichment.prev_funding_rates_percent))],
+                "Period": [f"t-{i+1}" for i in range(len(enrichment.prev_funding_rates_percent))],
                 "Rate %": enrichment.prev_funding_rates_percent,
             }
         )
