@@ -102,6 +102,7 @@ class CombinedFundingRow(_Frozen):
 
     base_asset: str
     quote_asset: str  # "USDT" or "USDC"
+    sector: Optional[str] = None  # from config/symbol_sectors.yaml; None when unknown
 
     binance_symbol: Optional[str]
     binance_rate_percent: Optional[float]

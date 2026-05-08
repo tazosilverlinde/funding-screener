@@ -29,7 +29,9 @@ from funding_screener.streamlit_helpers import (  # noqa: E402
     freshness_banner,
     minutes_to,
     render_table,
+    sector_sidebar,
     sidebar_status,
+    symbol_search_sidebar,
     to_df,
     watchlist_sidebar,
 )
@@ -38,7 +40,9 @@ st.set_page_config(page_title="High Funding (combined)", layout="wide")
 
 store = boot()
 sidebar_status(store)
+symbol_search_sidebar(store)
 watchlist = watchlist_sidebar()
+sector_bases = sector_sidebar()
 auto_rerun(interval_ms=30_000, key="page2_tick")
 
 cfg = settings()
@@ -82,6 +86,11 @@ rows = screen_combined_high_funding(
     klines_by_symbol=combined_klines,
 )
 
+# Apply sector filter on the *row* set before truncation so sector picks
+# don't get drowned out by row_limit.
+if sector_bases:
+    rows = [r for r in rows if r.base_asset.upper() in sector_bases]
+
 cap = int(cfg["row_limit"])
 df = to_df(
     [r.model_dump() for r in rows[:cap]],
@@ -93,6 +102,7 @@ df = to_df(
         "signal_short",
         "base_asset",
         "quote_asset",
+        "sector",
         "binance_symbol",
         "binance_rate_percent",
         "binance_rate_8h_norm_percent",
@@ -149,6 +159,7 @@ if not df.empty:
         columns={
             "base_asset": "Base",
             "quote_asset": "Quote",
+            "sector": "Sector",
             "binance_symbol": "Binance symbol",
             "binance_rate_percent": "Bnb rate %/period",
             "binance_rate_8h_norm_percent": "Bnb % / 8h",
@@ -223,6 +234,13 @@ if not df.empty:
                 "Quote currency: USDT or USDC. Each base/quote combination gets its own row "
                 "because their funding rates are independent — `WIFUSDT` and `WIFUSDC` may both "
                 "have high funding at the same time."
+            ),
+        ),
+        "Sector": st.column_config.TextColumn(
+            "Sector",
+            help=(
+                "Category from `config/symbol_sectors.yaml`. Use the sidebar Sector filter "
+                "to narrow rows to specific categories (e.g. only memes, only Layer-1s)."
             ),
         ),
         "Binance symbol": st.column_config.LinkColumn(

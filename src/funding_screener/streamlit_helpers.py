@@ -16,6 +16,7 @@ import streamlit as st
 from .background import DataStore, get_store, start_background, wait_for_initial_data
 from .config import fees as _fees_cfg
 from .config import is_binance_enabled, is_mexc_enabled
+from .sectors import all_sectors, symbols_in_sector
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -66,6 +67,102 @@ def freshness_banner(store: DataStore) -> None:
             cols[2].error(f"Background error: {err}")
     else:
         cols[2].success("Background updater healthy")
+
+
+def symbol_search_sidebar(store: DataStore) -> None:
+    """Sidebar widget that lets the user jump straight to a symbol's detail page.
+
+    Looks up the typed ticker against the current contracts cache; if it matches,
+    sets query params to /Symbol_Detail?exchange=...&symbol=... and reruns
+    Streamlit so navigation kicks in. Tolerates lower/upper case and the two
+    naming conventions (Binance "BTCUSDT" vs MEXC "BTC_USDT") so both work.
+    """
+    st.sidebar.divider()
+    st.sidebar.header("Quick search")
+    typed = st.sidebar.text_input(
+        "Symbol",
+        value="",
+        key="symbol_search_input",
+        placeholder="e.g. BTCUSDT, BTC_USDT, WIF",
+        help=(
+            "Type any ticker. Match is case-insensitive. If you type just the base "
+            "(e.g. 'WIF') we'll prefer the Binance USDT pair, then MEXC USDT."
+        ),
+    )
+    go = st.sidebar.button("Open detail", use_container_width=True, key="symbol_search_btn")
+    if not (go and typed.strip()):
+        return
+
+    target = typed.strip().upper()
+    bnb = store.read_binance()
+    mxc = store.read_mexc()
+
+    # 1. Exact symbol match on either exchange.
+    for c in bnb.contracts:
+        if c.symbol.upper() == target:
+            st.query_params["exchange"] = "Binance"
+            st.query_params["symbol"] = c.symbol
+            st.switch_page("pages/5_Symbol_Detail.py")
+            return
+    for c in mxc.contracts:
+        if c.symbol.upper() == target:
+            st.query_params["exchange"] = "MEXC"
+            st.query_params["symbol"] = c.symbol
+            st.switch_page("pages/5_Symbol_Detail.py")
+            return
+
+    # 2. Match by base asset — pick the canonical USDT pair.
+    base = target.removesuffix("USDT").removesuffix("USDC").rstrip("_")
+    for c in bnb.contracts:
+        if c.base_asset.upper() == base and c.quote_asset == "USDT":
+            st.query_params["exchange"] = "Binance"
+            st.query_params["symbol"] = c.symbol
+            st.switch_page("pages/5_Symbol_Detail.py")
+            return
+    for c in mxc.contracts:
+        if c.base_asset.upper() == base and c.quote_asset == "USDT":
+            st.query_params["exchange"] = "MEXC"
+            st.query_params["symbol"] = c.symbol
+            st.switch_page("pages/5_Symbol_Detail.py")
+            return
+
+    # 3. Tell the user nothing matched.
+    st.sidebar.warning(
+        f"`{typed}` not found in the current Binance or MEXC perp contracts. "
+        "Either it's a different ticker format, or the contract isn't TRADING."
+    )
+
+
+def sector_sidebar() -> set[str]:
+    """Render a sector multi-select in the sidebar; return the union of base
+    assets in the chosen sectors.
+
+    Returns an empty set when nothing's selected, which the caller treats as
+    "no filtering" (don't restrict the table).
+    """
+    sectors = all_sectors()
+    if not sectors:
+        return set()
+    st.sidebar.divider()
+    st.sidebar.header("Sector filter")
+    chosen = st.sidebar.multiselect(
+        "Sectors",
+        options=sectors,
+        default=[],
+        key="sector_filter",
+        help=(
+            "Narrow tables to base assets in one or more sectors. "
+            "Mappings live in `config/symbol_sectors.yaml`. "
+            "Tokens not classified there appear as '—' and get filtered out "
+            "when any sector is selected."
+        ),
+    )
+    if not chosen:
+        return set()
+    bases: set[str] = set()
+    for s in chosen:
+        bases |= symbols_in_sector(s)
+    return bases
 
 
 def watchlist_sidebar() -> set[str]:

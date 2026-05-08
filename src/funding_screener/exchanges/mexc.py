@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from ..config import mexc_default_maker_fee, fees, settings
+from ..config import mexc_default_maker_fee, fees, http_client_kwargs, settings
 from ..models import ContractInfo, FundingRow, Kline
 
 _BASE = "https://contract.mexc.com"
@@ -30,8 +30,7 @@ class MexcClient:
     name = "MEXC"
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
-        timeout = float(settings()["http"]["timeout_seconds"])
-        self._http = http or httpx.AsyncClient(timeout=timeout)
+        self._http = http or httpx.AsyncClient(**http_client_kwargs())
         self._owns_http = http is None
         self._cooldown_until: float = 0.0
 

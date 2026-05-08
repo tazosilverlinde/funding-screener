@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow, Kline
+from ..sectors import sector_for
 from ..signals import classify_signal, compute_composite_score, compute_realized_volatility
 
 _QUOTES = ("USDT", "USDC")
@@ -159,6 +160,7 @@ def screen_combined_high_funding(
             CombinedFundingRow(
                 base_asset=base,
                 quote_asset=quote,
+                sector=sector_for(base),
                 binance_symbol=b.symbol if b else None,
                 binance_rate_percent=b.rate_percent if b else None,
                 binance_rate_8h_norm_percent=b_norm,

@@ -23,6 +23,27 @@ def fees() -> dict:
         return yaml.safe_load(fh)
 
 
+def http_client_kwargs() -> dict:
+    """Standard kwargs for constructing httpx.AsyncClient — split timeouts and
+    connection pooling tuned for our background loops.
+
+    Returns kwargs you can pass directly: ``httpx.AsyncClient(**http_client_kwargs())``.
+    """
+    import httpx  # local import keeps config.py importable without httpx for tests
+
+    cfg = settings().get("http") or {}
+    read = float(cfg.get("timeout_seconds", 20))
+    connect = float(cfg.get("connect_timeout_seconds", 5))
+    return {
+        "timeout": httpx.Timeout(read, connect=connect),
+        "limits": httpx.Limits(
+            max_connections=int(cfg.get("max_connections", 20)),
+            max_keepalive_connections=int(cfg.get("max_keepalive_connections", 10)),
+        ),
+        "http2": False,  # Binance/MEXC don't speed up via h2 for our access pattern
+    }
+
+
 def binance_default_maker_fee() -> float:
     return float(fees()["binance"]["futures_maker"])
 

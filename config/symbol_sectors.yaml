@@ -1,0 +1,148 @@
+# Sector / category mapping for tradable tokens.
+#
+# Used by Page 2/3/4 to add a "Sector" column and a sidebar filter so you can
+# narrow the screener to one sector at a time (e.g. "show me only memes with
+# high funding").
+#
+# Sectors are curated and approximate — many tokens straddle categories.
+# When a token isn't listed here, the screener shows "—" (no sector). To add
+# coverage, just append the ticker to the appropriate list below.
+#
+# Lookup is case-insensitive. The ticker MUST match the base asset on
+# Binance/MEXC (so PEPE not 1000PEPE; the screener strips the "1000" prefix
+# before lookup).
+
+sectors:
+  layer1:
+    # Major Layer-1 blockchains (their L1 token)
+    - BTC
+    - ETH
+    - SOL
+    - BNB
+    - XRP
+    - ADA
+    - AVAX
+    - TRX
+    - TON
+    - DOT
+    - NEAR
+    - ATOM
+    - SUI
+    - APT
+    - HBAR
+    - ALGO
+    - XLM
+    - INJ
+    - SEI
+    - TIA
+    - KAS
+    - ICP
+    - VET
+    - FIL
+
+  layer2:
+    # Layer-2 / scaling solutions
+    - ARB
+    - OP
+    - MATIC
+    - POL
+    - STRK
+    - METIS
+    - MANTA
+    - LRC
+    - IMX
+
+  defi:
+    # DeFi blue chips & DEX/lending tokens
+    - UNI
+    - AAVE
+    - MKR
+    - LDO
+    - CRV
+    - SUSHI
+    - COMP
+    - SNX
+    - YFI
+    - PENDLE
+    - DYDX
+    - GMX
+    - JTO
+    - JUP
+    - RAY
+    - ETHFI
+    - ENA
+
+  oracle:
+    - LINK
+    - PYTH
+    - API3
+    - BAND
+
+  meme:
+    - PEPE
+    - SHIB
+    - DOGE
+    - WIF
+    - BONK
+    - FLOKI
+    - BOME
+    - MEME
+    - TURBO
+    - POPCAT
+    - MEW
+    - PNUT
+    - GOAT
+    - MOG
+    - BRETT
+
+  ai:
+    # AI-themed projects
+    - FET
+    - AGIX
+    - OCEAN
+    - RNDR
+    - RENDER
+    - WLD
+    - TAO
+    - NMR
+    - GRT
+    - ARKM
+    - VIRTUAL
+    - AKT
+    - SKYAI
+    - IO
+
+  gaming:
+    - GALA
+    - SAND
+    - MANA
+    - APE
+    - AXS
+    - ENJ
+    - GMT
+    - PIXEL
+    - BIGTIME
+    - BEAM
+
+  rwa:
+    # Real-world assets
+    - ONDO
+    - POLYX
+    - PROPC
+
+  privacy:
+    - ZEC
+    - XMR
+    - DASH
+
+  exchange:
+    # Exchange tokens
+    - CAKE   # PancakeSwap
+    - GMX
+    - DYDX
+
+  storage:
+    - FIL
+    - AR
+    - STORJ
+    - SC

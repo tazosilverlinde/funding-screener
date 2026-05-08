@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 import httpx
 
-from .config import settings
+from .config import http_client_kwargs, settings
 
 
 _DEFI_LLAMA = "https://stablecoins.llama.fi"
@@ -32,8 +32,12 @@ class DefiLlamaClient:
     name = "DefiLlama"
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
-        timeout = float(settings()["http"]["timeout_seconds"])
-        self._http = http or httpx.AsyncClient(timeout=max(timeout, 30.0))
+        if http is None:
+            kwargs = http_client_kwargs()
+            kwargs["timeout"] = httpx.Timeout(45.0, connect=5.0)
+            self._http = httpx.AsyncClient(**kwargs)
+        else:
+            self._http = http
         self._owns_http = http is None
 
     async def aclose(self) -> None:

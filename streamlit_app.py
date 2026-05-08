@@ -26,12 +26,14 @@ from funding_screener.streamlit_helpers import (  # noqa: E402
     boot,
     freshness_banner,
     sidebar_status,
+    symbol_search_sidebar,
 )
 
 st.set_page_config(page_title="Funding Screener", layout="wide", page_icon=":material/monitoring:")
 
 store = boot()
 sidebar_status(store)
+symbol_search_sidebar(store)
 auto_rerun(interval_ms=30_000, key="landing_tick")
 
 st.title("Funding Screener")

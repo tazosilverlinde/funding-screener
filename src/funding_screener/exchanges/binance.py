@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ..config import binance_maker_fee_for, binance_taker_fee_for, fees, settings
+from ..config import binance_maker_fee_for, binance_taker_fee_for, fees, http_client_kwargs, settings
 from ..models import ContractInfo, FundingRow, Kline
 
 _BASE = "https://fapi.binance.com"
@@ -39,8 +39,8 @@ class BinanceClient:
     name = "Binance"
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
-        timeout = float(settings()["http"]["timeout_seconds"])
-        self._http = http or httpx.AsyncClient(timeout=timeout)
+        # Use the shared httpx config: split connect/read timeouts + pooled connections.
+        self._http = http or httpx.AsyncClient(**http_client_kwargs())
         self._owns_http = http is None
         self._cooldown_until: float = 0.0  # monotonic seconds
 

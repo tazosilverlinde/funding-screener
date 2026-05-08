@@ -33,7 +33,7 @@ from typing import Any, Iterable, Optional
 import httpx
 import yaml
 
-from .config import settings
+from .config import http_client_kwargs, settings
 
 # `Transfer(address indexed from, address indexed to, uint256 value)` event signature.
 _TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -142,9 +142,14 @@ class EthOnchainClient:
         rpc_urls: list[str] | None = None,
         http: httpx.AsyncClient | None = None,
     ) -> None:
-        timeout = float(settings()["http"]["timeout_seconds"])
         self._rpc_urls = list(rpc_urls or _DEFAULT_RPCS)
-        self._http = http or httpx.AsyncClient(timeout=max(timeout, 30.0))
+        if http is None:
+            kwargs = http_client_kwargs()
+            # Block-range RPC queries can be slow; allow generous read timeout.
+            kwargs["timeout"] = httpx.Timeout(45.0, connect=5.0)
+            self._http = httpx.AsyncClient(**kwargs)
+        else:
+            self._http = http
         self._owns_http = http is None
         self._next_idx = 0  # round-robin starting point per request
 

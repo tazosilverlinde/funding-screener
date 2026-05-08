@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from .config import settings
+from .config import http_client_kwargs, settings
 
 _BASE = "https://api.coingecko.com/api/v3"
 _PAPRIKA = "https://api.coinpaprika.com/v1"
@@ -33,9 +33,13 @@ class CoinPaprikaClient:
     name = "CoinPaprika"
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
-        timeout = float(settings()["http"]["timeout_seconds"])
-        # /v1/tickers can return ~5MB; bump timeout a bit beyond the default.
-        self._http = http or httpx.AsyncClient(timeout=max(timeout, 30.0))
+        # /v1/tickers can return ~5MB; override timeout to be a bit more generous.
+        if http is None:
+            kwargs = http_client_kwargs()
+            kwargs["timeout"] = httpx.Timeout(45.0, connect=5.0)
+            self._http = httpx.AsyncClient(**kwargs)
+        else:
+            self._http = http
         self._owns_http = http is None
 
     async def aclose(self) -> None:
@@ -88,8 +92,7 @@ class CoinGeckoClient:
     name = "CoinGecko"
 
     def __init__(self, http: httpx.AsyncClient | None = None) -> None:
-        timeout = float(settings()["http"]["timeout_seconds"])
-        self._http = http or httpx.AsyncClient(timeout=timeout)
+        self._http = http or httpx.AsyncClient(**http_client_kwargs())
         self._owns_http = http is None
 
     async def aclose(self) -> None:

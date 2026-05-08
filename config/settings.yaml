@@ -44,5 +44,10 @@ cache_ttl_seconds:
   contract_detail: 3600
 
 http:
-  timeout_seconds: 20    # was 15; bumped to absorb transient network slowness
-  max_retries: 3         # was 2; gives 4 attempts total (0.4s, 0.8s, 1.2s back-off)
+  timeout_seconds: 20    # overall read timeout — server's allowed time to respond
+  connect_timeout_seconds: 5    # TCP connect timeout — separate, much shorter
+  max_retries: 3         # 4 attempts total with 0.4s, 0.8s, 1.2s back-off
+  # Connection pool — reuses TCP/TLS sessions across requests for big speedup
+  # on the multi-symbol enrichment loop.
+  max_connections: 20
+  max_keepalive_connections: 10
