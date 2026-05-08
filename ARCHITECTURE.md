@@ -3,86 +3,139 @@
 ## Data flow
 
 ```
-                                ┌────────────────────────────┐
-                                │  Public REST APIs          │
-                                │  - fapi.binance.com        │
-                                │  - contract.mexc.com       │
-                                └──────────────┬─────────────┘
-                                               │ httpx.AsyncClient
-                                               │
-                                ┌──────────────▼─────────────┐
-                                │  background.py             │
-                                │  daemon thread             │
-                                │  ├─ fast loop (60s)        │  funding, contracts, vol
-                                │  └─ slow loop (5m)         │  klines for top-N
-                                └──────────────┬─────────────┘
-                                               │ thread-safe writes
-                                               │
-                                ┌──────────────▼─────────────┐
-                                │  DataStore (in-memory)     │
-                                │  binance: ExchangeSnapshot │
-                                │  mexc:    ExchangeSnapshot │
-                                └──────────────┬─────────────┘
-                                               │ thread-safe reads (snapshot copy)
-                                               │
-                ┌──────────────────────────────┼──────────────────────────────┐
-                │                              │                              │
-        ┌───────▼────────┐         ┌───────────▼───────────┐         ┌────────▼────────┐
-        │ usdt_usdc_arb  │         │ combined_high_funding │         │   price_rise    │
-        │   (pure fn)    │         │      (pure fn)        │         │    (pure fn)    │
-        └───────┬────────┘         └───────────┬───────────┘         └────────┬────────┘
-                │                              │                              │
-                └──────────────────────────────┼──────────────────────────────┘
-                                               │
-                                ┌──────────────▼─────────────┐
-                                │      Streamlit pages       │
-                                │  pages/1..4_*.py           │
-                                │  + streamlit_app.py        │
-                                └──────────────┬─────────────┘
-                                               │ via streamlit-autorefresh
-                                               │ (30–60s)
-                                ┌──────────────▼─────────────┐
-                                │           Browser           │
-                                └────────────────────────────┘
+                     ┌────────────────────────────────────┐
+                     │  Public REST APIs (no keys)        │
+                     │  - fapi.binance.com                │
+                     │  - contract.mexc.com               │
+                     │  - api.coinpaprika.com             │
+                     │  - stablecoins.llama.fi            │
+                     │  - public Ethereum RPCs (×5 fallback)│
+                     │  - api.telegram.org (egress only)  │
+                     └─────────────────┬──────────────────┘
+                                       │ httpx.AsyncClient (pooled, split timeouts)
+                                       │
+                     ┌─────────────────▼──────────────────┐
+                     │  background.py                     │
+                     │  daemon thread                     │
+                     │  ├─ fast loop          (60s)       │  funding / contracts / vol
+                     │  ├─ slow loop          (5m)        │  klines for top-N
+                     │  ├─ market caps loop   (5m)        │  CoinPaprika top-1000
+                     │  ├─ macro loop         (15m)       │  stablecoin supply
+                     │  ├─ enrichment loop    (3m)        │  top-30 funding/OI/LS history
+                     │  ├─ onchain loop       (15m)       │  ETH 24h netflow per token
+                     │  ├─ macro flow loop    (6h)        │  ETH 7d daily flows (USDT/USDC/WBTC/WETH)
+                     │  └─ alerts loop        (60s)       │  Telegram on threshold transitions
+                     └─────────────────┬──────────────────┘
+                                       │ thread-safe writes
+                                       │
+                     ┌─────────────────▼──────────────────┐
+                     │  DataStore (in-memory)             │
+                     │  binance / mexc snapshots          │
+                     │  market_caps_usd                   │
+                     │  enrichments[(exchange, symbol)]   │
+                     │  stablecoin_supply                 │
+                     │  onchain_flows / macro_daily_flows │
+                     └─────────────────┬──────────────────┘
+                                       │ thread-safe reads (snapshot copy)
+                                       │
+        ┌──────────────────────────────┼──────────────────────────────┐
+        │                              │                              │
+┌───────▼────────┐         ┌───────────▼─────────────┐     ┌──────────▼────────────┐
+│ usdt_usdc_arb  │         │ combined_high_funding   │     │   price_rise          │
+│   (pure fn)    │         │  + composite score      │     │   + composite score   │
+└───────┬────────┘         └───────────┬─────────────┘     └──────────┬────────────┘
+        │                              │                              │
+        └──────────────────────────────┼──────────────────────────────┘
+                                       │
+                     ┌─────────────────▼──────────────────┐
+                     │  Streamlit pages 1-7 + landing     │
+                     │  (auto-rerun every 30-60s)         │
+                     └────────────────────────────────────┘
 ```
 
-## Module responsibilities
-
-- **`background.py`** — `DataStore`, daemon thread, fast/slow asyncio loops, retry on partial errors. The only place that performs HTTP fetches.
-- **`exchanges/{base,binance,mexc}.py`** — async REST clients. `ExchangeClient` Protocol defines the methods every exchange must support: `fetch_funding_rows`, `fetch_contracts`, `fetch_daily_klines`, `fetch_24h_quote_volume`. Returns Pydantic models.
-- **`screener/*.py`** — pure functions: take cached data, return list of row models. **No I/O inside**.
-- **`models.py`** — frozen Pydantic models (`FundingRow`, `ContractInfo`, `Kline`, `ArbRow`, `CombinedFundingRow`, `PriceRiseRow`).
-- **`streamlit_helpers.py`** — `boot()`, `sidebar_status()`, `freshness_banner()`, `auto_rerun()`, `render_table()`. The only Streamlit-aware module inside `src/funding_screener/`.
-- **`config.py`** — loads `config/*.yaml` once.
-
-## Funding-rate math (cross-quote arbitrage)
+## Module map
 
 ```
-funding_diff_per_period   = abs(rate_a - rate_b)            # signed values, abs of diff
-funding_diff_8h_normalized = funding_diff_per_period * 8 / interval_hours
-fees_total                = 4 × maker_fee                   # entry+exit on each leg
-profitable_at_next_funding = funding_diff_per_period > fees_total
+streamlit_app.py             ← landing: macro banner + sector rotation + status
+pages/
+  1_Binance_USDT_USDC_Arb.py
+  2_High_Funding.py          ← composite score + signal + L/S + OI Δ + vol-adj
+  3_Binance_Price_Rise.py    ← composite score column added
+  4_MEXC_Price_Rise.py       ← composite score column added
+  5_Symbol_Detail.py         ← 90d funding chart, OI, L/S, kline, score breakdown
+  6_Whale_Flows.py           ← 24h flows + whale subset (>$500K) + 7d macro
+  7_Token_Unlocks.py         ← filter: window + min %
+
+src/funding_screener/
+  background.py              ← daemon thread, all loops, DataStore
+  exchanges/
+    base.py                  ← ExchangeClient Protocol
+    binance.py               ← public REST: funding, contracts, klines, OI hist, L/S
+    mexc.py                  ← public REST: funding, contracts, klines
+  market_data.py             ← CoinPaprikaClient (top-N market caps)
+  macro.py                   ← DefiLlamaClient (stablecoin supply)
+  onchain.py                 ← Eth JSON-RPC (5-RPC fallback) + netflow + whale aggregation
+  notifications.py           ← TelegramClient + alert state machine + evaluators
+  models.py                  ← Pydantic frozen models
+  config.py                  ← YAML loaders + http_client_kwargs (shared httpx config)
+  sectors.py                 ← sector classification + sector_aggregates
+  signals.py                 ← classify_signal + compute_composite_score + realized_volatility
+  unlocks.py                 ← token unlock YAML parser
+  streamlit_helpers.py       ← UI plumbing: boot, sidebar widgets, render_table, etc.
+  screener/                  ← PURE FUNCTIONS over cached data — no I/O inside
+    high_funding.py
+    combined_high_funding.py
+    usdt_usdc_arb.py
+    price_rise.py
+
+config/
+  settings.yaml              ← thresholds, HTTP, refresh intervals
+  fees.yaml                  ← maker/taker per exchange/quote/symbol
+  exchange_wallets.yaml      ← CEX hot wallets (auto-discovery exclusion + flow source)
+  non_whale_addresses.yaml   ← DEX routers, bridges, market makers (whale-class exclusion)
+  eth_token_contracts.yaml   ← ERC-20 contract addresses per ticker
+  symbol_sectors.yaml        ← curated sector buckets
+  token_unlocks.yaml         ← manually-maintained unlock calendar
+  alerts.yaml                ← Telegram thresholds + cooldowns
+
+tests/                       ← 89 unit tests
+scripts/
+  run_screener.py            ← one-shot CLI for verification
+  test_pages.py              ← AppTest harness for all 8 pages
 ```
 
-Direction (which leg longs / shorts) derived from the signs:
+## Composite signal score
 
 ```
-if rate_usdt > rate_usdc:  short USDT leg, long USDC leg
-else:                       long USDT leg, short USDC leg
+score = clamp([-100, +100],
+    -15 × clamp([-2, +2], funding_8h_norm)        # funding direction (±30)
+  + (sign(streak_dir) × 15 if streak ≥ 3 else 7.5 if streak == 2 else 0)
+  + 0.3 × clamp([-50, +50], oi_24h_pct) × sign(funding_direction_consistent)
+  + (-10 if ls_global > 3 else +10 if ls_global < 0.4 else 0)
+  + (±5 when smart money disagrees with retail)
+  + 15 × clamp([-50M, +50M], onchain_net_usd) / 50M
+) × (0.5 if |mark_index_spread| > 0.5% else 1.0)
 ```
 
-## Funding-rate math (combined high-funding page)
+Each input is independent — score is computed from whatever's available.
 
-For each base asset present on either exchange's USDT perp:
+## Design conventions
 
-```
-binance_8h = binance.rate_per_period * 8 / binance.interval_hours
-mexc_8h    = mexc.rate_per_period   * 8 / mexc.interval_hours
-spread     = binance_8h - mexc_8h            # nullable, only when both sides present
-include    = max(|binance_8h|, |mexc_8h|) > threshold
-```
+- **Public endpoints only.** No API keys needed for the screener.
+- **Pure screeners.** Anything in `src/funding_screener/screener/` must be a pure function over cached data — never call HTTP, never touch the DataStore. The background loop fetches; pages compose; screeners filter.
+- **Streamlit imports** are confined to `streamlit_app.py`, `pages/`, and `streamlit_helpers.py`. The rest of `funding_screener` is UI-agnostic so screener logic can be tested without Streamlit installed.
+- **Funding rate sign convention**: store the *signed* rate as a float (positive = longs pay shorts, negative = shorts pay longs).
+- **Funding rates expressed in %** (not fractions). `0.01` means 0.01%, not 1%.
+- **8h-normalized rate** = `raw_rate * 8 / interval_hours`. Always compute both.
+- **Symbol naming**: keep each exchange's native form (Binance `BTCUSDT`, MEXC `BTC_USDT`). Only convert at the display layer.
+- **Don't I/O in screeners.** Pure functions only.
 
-A row may have only one of the two sides — `None` for the missing exchange's columns.
+## Refresh strategy
+
+- Streamlit pages re-render every 30–60s via `streamlit-autorefresh`.
+- Background loops fetch on independent cadences (table above).
+- DataStore is locked per write/read; readers get a snapshot copy.
+- Cooldown: 418/429/451 from any exchange triggers a per-client cooldown that's honoured on subsequent calls; UI surfaces it as a yellow banner.
 
 ## Out of scope
 
