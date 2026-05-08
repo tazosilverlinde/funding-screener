@@ -77,6 +77,7 @@ st.markdown(
 | 4 | MEXC price rise | Same as #3 for MEXC. |
 | 5 | Symbol detail | Click any symbol on other pages → full per-contract view (funding history, OI, L/S ratio, kline chart, signal). |
 | 6 | Exchange flows | 24h on-chain netflow per token (our own ETH-RPC implementation, no API keys). |
+| 7 | Token unlocks | Upcoming unlock events for tokens tradable on Binance/MEXC. Manually maintained YAML. |
 
 All data refreshes automatically via the background updater. The sidebar shows
 the age of each data type and the maker-fee values in use.

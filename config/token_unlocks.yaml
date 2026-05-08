@@ -1,0 +1,79 @@
+# Token unlock calendar — manually maintained.
+#
+# Free unlock APIs are paywalled (DefiLlama Pro, Tokenomist, Cryptorank).
+# Populate this YAML by hand from the public web dashboards:
+#   - https://defillama.com/unlocks                              (best coverage)
+#   - https://cryptorank.io/token-unlock
+#   - https://www.coingecko.com/en/highlights/incoming-token-unlocks
+#   - https://coinmarketcap.com/token-unlocks/
+#
+# UPDATE CADENCE: weekly is plenty — major unlocks are scheduled months ahead.
+# When a row's date is in the past, the screener auto-hides it; you can delete
+# old entries during the weekly update or leave them (they're just ignored).
+#
+# REQUIRED FIELDS:
+#   symbol         — must match the Binance/MEXC futures ticker exactly (e.g. "ARB")
+#   date           — YYYY-MM-DD (treated as UTC midnight)
+#   amount_tokens  — number of tokens being unlocked at this event
+#   type           — "cliff" | "linear" | "milestone" | "staking" | "airdrop"
+#
+# OPTIONAL FIELDS:
+#   name              — full project name (display only)
+#   amount_usd        — USD value at announcement; if null, we compute from current price
+#   pct_of_supply     — % of CIRCULATING supply unlocking (drives impact color)
+#   pct_of_total      — % of TOTAL supply unlocking (often smaller / informational)
+#   notes             — free-form context (vesting source, anomalies, etc.)
+#
+# TYPE meanings:
+#   cliff      — single large release on the date
+#   linear     — daily/continuous emission; "date" is the schedule peak or month
+#   milestone  — release contingent on a project milestone (date is target)
+#   staking    — large staked-token unlock period ends (e.g. ETH withdrawals)
+#   airdrop    — claim period or distribution starting
+#
+# IMPACT color in the UI:
+#   pct_of_supply >= 3.0  → 🔴 High    (significant sell pressure expected)
+#   pct_of_supply >= 1.0  → 🟡 Medium  (notable but absorbable)
+#   otherwise              → 🟢 Low     (probably noise)
+
+unlocks:
+  # ============== EXAMPLES — verify against defillama.com/unlocks before trusting ==============
+  # These reflect the typical monthly cadence of major Layer-1 / Layer-2 schedules.
+  # The exact date and token amount changes each month — update from a current source.
+  #
+  # - symbol: ARB
+  #   name: "Arbitrum"
+  #   date: "2026-05-16"
+  #   amount_tokens: 92655000
+  #   pct_of_supply: 1.84
+  #   pct_of_total: 0.93
+  #   type: "cliff"
+  #   notes: "Monthly investor + team cliff unlock"
+  #
+  # - symbol: APT
+  #   name: "Aptos"
+  #   date: "2026-05-12"
+  #   amount_tokens: 11310000
+  #   pct_of_supply: 1.66
+  #   pct_of_total: 1.03
+  #   type: "cliff"
+  #   notes: "Monthly investor/team unlock — typically the 12th"
+  #
+  # - symbol: SUI
+  #   name: "Sui"
+  #   date: "2026-06-01"
+  #   amount_tokens: 64190000
+  #   pct_of_supply: 1.78
+  #   pct_of_total: 0.64
+  #   type: "cliff"
+  #   notes: "Monthly cliff, typically 1st of the month"
+  #
+  # - symbol: STRK
+  #   name: "Starknet"
+  #   date: "2026-05-15"
+  #   amount_tokens: 64000000
+  #   pct_of_supply: 2.40
+  #   pct_of_total: 0.64
+  #   type: "cliff"
+  #   notes: "Investor + early contributor unlock, monthly"
+  # ===============================================================================
