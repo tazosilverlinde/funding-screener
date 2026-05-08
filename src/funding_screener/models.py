@@ -83,6 +83,12 @@ class EnrichmentData(_Frozen):
     funding_streak_count: int                  # consecutive same-sign at the front
     funding_streak_direction: Optional[str]    # "pos" | "neg" | None
     mark_index_spread_percent: Optional[float] # signed: mark - index, as % of index
+    # Binance-only on-chain-ish enrichment (MEXC public API doesn't expose these):
+    oi_usd: Optional[float] = None             # current open-interest in USD
+    oi_change_1h_pct: Optional[float] = None
+    oi_change_24h_pct: Optional[float] = None
+    ls_ratio_global: Optional[float] = None    # retail accounts long/short
+    ls_ratio_top: Optional[float] = None       # top traders (top-20% by collateral)
     fetched_at: datetime
 
 
@@ -106,6 +112,9 @@ class CombinedFundingRow(_Frozen):
     binance_mark_index_spread_percent: Optional[float]
     binance_funding_streak: Optional[str]                  # display string, e.g. "3↑"
     binance_volume_24h_millions: Optional[float]           # 24h quote volume in M USDT/USDC
+    binance_oi_change_24h_pct: Optional[float] = None      # open interest 24h Δ%
+    binance_ls_ratio_global: Optional[float] = None        # retail account long/short
+    binance_ls_ratio_top: Optional[float] = None           # top-trader long/short
 
     mexc_symbol: Optional[str]
     mexc_rate_percent: Optional[float]

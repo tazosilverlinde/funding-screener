@@ -23,6 +23,7 @@ from typing import Optional
 from .config import is_binance_enabled, is_mexc_enabled, settings
 from .exchanges.binance import BinanceClient
 from .exchanges.mexc import MexcClient
+from .macro import DefiLlamaClient
 from .market_data import CoinPaprikaClient
 from .models import ContractInfo, EnrichmentData, FundingRow, Kline
 from .signals import compute_funding_streak
@@ -47,10 +48,12 @@ class DataStore:
         self.mexc = ExchangeSnapshot()
         self.market_caps_usd: dict[str, float] = {}  # base_asset upper → USD mcap
         self.enrichments: dict[tuple[str, str], EnrichmentData] = {}  # (exchange, symbol) → enrichment
+        self.stablecoin_supply: dict[str, dict[str, float]] = {}  # macro: USDT/USDC/TOTAL supply
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
         self.last_enrichment_at: Optional[datetime] = None
+        self.last_macro_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self.bg_started_at: Optional[datetime] = None
 
@@ -96,6 +99,15 @@ class DataStore:
     def read_market_caps(self) -> dict[str, float]:
         with self._lock:
             return dict(self.market_caps_usd)
+
+    def update_stablecoin_supply(self, supply: dict[str, dict[str, float]]) -> None:
+        with self._lock:
+            self.stablecoin_supply = supply
+            self.last_macro_at = datetime.now(timezone.utc)
+
+    def read_stablecoin_supply(self) -> dict[str, dict[str, float]]:
+        with self._lock:
+            return {k: dict(v) for k, v in self.stablecoin_supply.items()}
 
     def update_enrichments(self, items: list[EnrichmentData]) -> None:
         with self._lock:
@@ -262,6 +274,23 @@ async def _market_caps_loop(store: DataStore, mcap_client: CoinPaprikaClient) ->
         await asyncio.sleep(interval)
 
 
+async def _macro_loop(store: DataStore, llama: DefiLlamaClient) -> None:
+    """Stablecoin supply from DefiLlama — every 15 minutes.
+
+    These move slowly (USDT issuance is daily-scale) so a long interval is fine.
+    """
+    interval = 900
+    while True:
+        try:
+            supply = await llama.fetch_stablecoin_supply()
+            if supply:
+                store.update_stablecoin_supply(supply)
+        except Exception as e:
+            log.exception("macro loop error")
+            store.record_error(f"macro: {type(e).__name__}: {e}")
+        await asyncio.sleep(interval)
+
+
 async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient) -> None:
     """Pull funding-rate history + compute streaks for the top-N flagged symbols.
 
@@ -302,14 +331,22 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
 
             async def _enrich_binance(row: FundingRow) -> Optional[EnrichmentData]:
                 async with sem:
-                    try:
-                        history = await binance.fetch_funding_rate_history(row.symbol, limit=4)
-                    except Exception:
-                        history = []
+                    results = await asyncio.gather(
+                        binance.fetch_funding_rate_history(row.symbol, limit=4),
+                        binance.fetch_open_interest_history(row.symbol, period="1h", limit=24),
+                        binance.fetch_long_short_ratio_global(row.symbol, period="1h", limit=1),
+                        binance.fetch_long_short_ratio_top(row.symbol, period="1h", limit=1),
+                        return_exceptions=True,
+                    )
+                history = results[0] if isinstance(results[0], list) else []
+                oi_hist = results[1] if isinstance(results[1], list) else []
+                ls_g = results[2] if not isinstance(results[2], Exception) else None
+                ls_t = results[3] if not isinstance(results[3], Exception) else None
                 count, direction = compute_funding_streak(history)
                 spread = None
                 if row.mark_price is not None and row.index_price and row.index_price > 0:
                     spread = (row.mark_price - row.index_price) / row.index_price * 100.0
+                oi_now, oi_1h, oi_24h = _oi_metrics_from_hist(oi_hist)
                 return EnrichmentData(
                     exchange="Binance",
                     symbol=row.symbol,
@@ -317,6 +354,11 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
                     funding_streak_count=count,
                     funding_streak_direction=direction,
                     mark_index_spread_percent=spread,
+                    oi_usd=oi_now,
+                    oi_change_1h_pct=oi_1h,
+                    oi_change_24h_pct=oi_24h,
+                    ls_ratio_global=ls_g,
+                    ls_ratio_top=ls_t,
                     fetched_at=datetime.now(timezone.utc),
                 )
 
@@ -394,6 +436,38 @@ def _ok(result):
     return None if isinstance(result, Exception) else result
 
 
+def _oi_metrics_from_hist(hist: list) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Extract (current_oi_usd, change_1h_pct, change_24h_pct) from /openInterestHist.
+
+    History is ordered oldest -> newest. Returns Nones if data is too sparse.
+    """
+    if not hist:
+        return (None, None, None)
+    try:
+        cur = float(hist[-1].get("sumOpenInterestValue", 0) or 0)
+    except (TypeError, ValueError):
+        return (None, None, None)
+    if cur <= 0:
+        return (None, None, None)
+    change_1h: Optional[float] = None
+    change_24h: Optional[float] = None
+    if len(hist) >= 2:
+        try:
+            prev = float(hist[-2].get("sumOpenInterestValue", 0) or 0)
+            if prev > 0:
+                change_1h = (cur / prev - 1.0) * 100.0
+        except (TypeError, ValueError):
+            pass
+    if len(hist) >= 24:
+        try:
+            old = float(hist[0].get("sumOpenInterestValue", 0) or 0)
+            if old > 0:
+                change_24h = (cur / old - 1.0) * 100.0
+        except (TypeError, ValueError):
+            pass
+    return (cur, change_1h, change_24h)
+
+
 def _describe_errors(errs: list) -> str:
     """Render up to 3 exceptions with type + repr so empty-str exceptions
     (e.g. bare TimeoutError()) still produce an actionable message."""
@@ -411,6 +485,7 @@ def _runner() -> None:
     binance = BinanceClient()
     mexc = MexcClient()
     mcap_client = CoinPaprikaClient()
+    llama = DefiLlamaClient()
     _runner_state["binance"] = binance
     _runner_state["mexc"] = mexc
     try:
@@ -419,11 +494,16 @@ def _runner() -> None:
         loop.create_task(_slow_loop(_store, binance, mexc))
         loop.create_task(_market_caps_loop(_store, mcap_client))
         loop.create_task(_enrichment_loop(_store, binance, mexc))
+        loop.create_task(_macro_loop(_store, llama))
         loop.run_forever()
     finally:
         try:
             loop.run_until_complete(
-                asyncio.gather(binance.aclose(), mexc.aclose(), mcap_client.aclose(), return_exceptions=True)
+                asyncio.gather(
+                    binance.aclose(), mexc.aclose(),
+                    mcap_client.aclose(), llama.aclose(),
+                    return_exceptions=True,
+                )
             )
         except Exception:
             pass

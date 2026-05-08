@@ -87,6 +87,9 @@ df = to_df(
         "binance_maker_fee_percent",
         "binance_mark_index_spread_percent",
         "binance_funding_streak",
+        "binance_oi_change_24h_pct",
+        "binance_ls_ratio_global",
+        "binance_ls_ratio_top",
         "binance_volume_24h_millions",
         "mexc_symbol",
         "mexc_rate_percent",
@@ -131,6 +134,9 @@ if not df.empty:
             "binance_maker_fee_percent": "Bnb fee %",
             "binance_mark_index_spread_percent": "Bnb mark/idx %",
             "binance_funding_streak": "Bnb streak",
+            "binance_oi_change_24h_pct": "Bnb OI 24h Δ%",
+            "binance_ls_ratio_global": "Bnb L/S retail",
+            "binance_ls_ratio_top": "Bnb L/S top",
             "binance_volume_24h_millions": "Bnb 24h vol (M)",
             "mexc_symbol": "MEXC symbol",
             "mexc_rate_percent": "MXC rate %/period",
@@ -253,6 +259,33 @@ if not df.empty:
                 "Binance contract's 24h quote volume in millions of USDT/USDC.\n"
                 "Below ~1M → illiquid. Funding rate on a low-volume contract is noisy and may "
                 "not reflect a tradeable opportunity (slippage and orderbook gaps eat the edge)."
+            ),
+        ),
+        "Bnb OI 24h Δ%": st.column_config.NumberColumn(
+            format="%+.2f",
+            help=(
+                "Binance open-interest 24h change in percent.\n"
+                "+30%+ with rising price = real new money buying (momentum, often follow-able).\n"
+                "+30%+ with falling price = shorts loading up (squeeze fuel building).\n"
+                "−20%+ = mass position unwind (capitulation or take-profit)."
+            ),
+        ),
+        "Bnb L/S retail": st.column_config.NumberColumn(
+            format="%.2f",
+            help=(
+                "Binance global account long/short ratio (retail-dominated).\n"
+                ">3 = ~75% of accounts long → crowded long, contrarian short signal.\n"
+                "<0.4 = ~70%+ short → crowded short, squeeze risk for shorts.\n"
+                "0.7–1.5 = normal/balanced."
+            ),
+        ),
+        "Bnb L/S top": st.column_config.NumberColumn(
+            format="%.2f",
+            help=(
+                "Binance top-trader long/short ratio (top 20% by collateral).\n"
+                "Compare to L/S retail — when top traders disagree with retail, it's a smart-vs-dumb-money signal:\n"
+                "  • Top short + retail long → smart money positioned against retail (bearish bias)\n"
+                "  • Top long + retail short → smart money positioned against retail (bullish bias)"
             ),
         ),
         "MXC 24h vol (M)": st.column_config.NumberColumn(

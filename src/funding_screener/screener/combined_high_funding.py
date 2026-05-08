@@ -99,6 +99,9 @@ def screen_combined_high_funding(
         b_streak = _streak_display(b_enr.funding_streak_count, b_enr.funding_streak_direction) if b_enr else None
         m_streak = _streak_display(m_enr.funding_streak_count, m_enr.funding_streak_direction) if m_enr else None
         b_spread = b_enr.mark_index_spread_percent if b_enr else None
+        b_oi_24h = b_enr.oi_change_24h_pct if b_enr else None
+        b_ls_global = b_enr.ls_ratio_global if b_enr else None
+        b_ls_top = b_enr.ls_ratio_top if b_enr else None
 
         # Pick the side with the larger absolute 8h-norm to drive the signal.
         if abs(b_norm or 0.0) >= abs(m_norm or 0.0):
@@ -135,6 +138,9 @@ def screen_combined_high_funding(
                 binance_mark_index_spread_percent=b_spread,
                 binance_funding_streak=b_streak,
                 binance_volume_24h_millions=(b_vol / 1e6) if b_vol is not None else None,
+                binance_oi_change_24h_pct=b_oi_24h,
+                binance_ls_ratio_global=b_ls_global,
+                binance_ls_ratio_top=b_ls_top,
                 mexc_symbol=m.symbol if m else None,
                 mexc_rate_percent=m.rate_percent if m else None,
                 mexc_rate_8h_norm_percent=m_norm,
