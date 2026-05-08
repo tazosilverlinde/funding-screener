@@ -48,6 +48,13 @@ class BinanceClient:
         if self._owns_http:
             await self._http.aclose()
 
+    def is_cooled_down(self) -> bool:
+        """True while a 418/429/451 cooldown is active (skip calling)."""
+        return time.monotonic() < self._cooldown_until
+
+    def cooldown_remaining_seconds(self) -> int:
+        return max(0, int(self._cooldown_until - time.monotonic()))
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         if time.monotonic() < self._cooldown_until:
             remaining = int(self._cooldown_until - time.monotonic())

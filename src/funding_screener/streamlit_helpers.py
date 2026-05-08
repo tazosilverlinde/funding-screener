@@ -70,6 +70,19 @@ def sidebar_status(store: DataStore) -> None:
         st.sidebar.warning("Binance disabled (set `BINANCE_ENABLED=true` to re-enable)")
     if not is_mexc_enabled():
         st.sidebar.warning("MEXC disabled (set `MEXC_ENABLED=true` to re-enable)")
+    # Surface auto-cooldown so users know the platform geo-blocked us.
+    try:
+        from .background import _runner_clients  # type: ignore[attr-defined]
+        # Only some setups expose this — silently skip if not available.
+        bnb_client, mxc_client = _runner_clients()
+        if bnb_client and bnb_client.is_cooled_down():
+            mins = bnb_client.cooldown_remaining_seconds() // 60
+            st.sidebar.warning(f"Binance auto-disabled by host (cooldown {mins}m left)")
+        if mxc_client and mxc_client.is_cooled_down():
+            mins = mxc_client.cooldown_remaining_seconds() // 60
+            st.sidebar.warning(f"MEXC auto-disabled by host (cooldown {mins}m left)")
+    except Exception:
+        pass
 
     st.sidebar.divider()
     st.sidebar.header("Maker fees")

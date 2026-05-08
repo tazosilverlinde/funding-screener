@@ -143,10 +143,16 @@ class DataStore:
 _store: DataStore = DataStore()
 _thread: Optional[threading.Thread] = None
 _started = threading.Event()
+_runner_state: dict = {}  # holds the live clients for sidebar status display
 
 
 def get_store() -> DataStore:
     return _store
+
+
+def _runner_clients() -> tuple[Optional[BinanceClient], Optional[MexcClient]]:
+    """Public read of the daemon thread's live clients (read-only; for UI status)."""
+    return _runner_state.get("binance"), _runner_state.get("mexc")
 
 
 # ---- background loops ----
@@ -155,14 +161,16 @@ def get_store() -> DataStore:
 async def _fast_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient) -> None:
     """Funding rates, contracts, 24h volumes — every 60s.
 
-    Honours BINANCE_ENABLED / MEXC_ENABLED env flags: when an exchange is
-    disabled, its three calls are skipped entirely (no HTTP, no cache update).
+    Skip an exchange entirely when:
+      - its env flag (BINANCE_ENABLED / MEXC_ENABLED) is false, OR
+      - the client is in cooldown (after 418/429/451)
+    Either condition silences error noise from a known-blocked exchange.
     """
     interval = 60
     while True:
         try:
-            bnb_on = is_binance_enabled()
-            mxc_on = is_mexc_enabled()
+            bnb_on = is_binance_enabled() and not binance.is_cooled_down()
+            mxc_on = is_mexc_enabled() and not mexc.is_cooled_down()
             tasks: list = []
             if bnb_on:
                 tasks += [
@@ -228,9 +236,9 @@ async def _slow_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
     while True:
         try:
             tasks = []
-            if is_binance_enabled():
+            if is_binance_enabled() and not binance.is_cooled_down():
                 tasks.append(_refresh_klines(store, "binance", binance, candidate_cap, days_to_fetch, min_vol))
-            if is_mexc_enabled():
+            if is_mexc_enabled() and not mexc.is_cooled_down():
                 tasks.append(_refresh_klines(store, "mexc", mexc, candidate_cap, days_to_fetch, min_vol))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -273,8 +281,8 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
 
     while True:
         try:
-            bnb_on = is_binance_enabled()
-            mxc_on = is_mexc_enabled()
+            bnb_on = is_binance_enabled() and not binance.is_cooled_down()
+            mxc_on = is_mexc_enabled() and not mexc.is_cooled_down()
             bnb_snap = store.read_binance()
             mxc_snap = store.read_mexc()
 
@@ -393,6 +401,8 @@ def _runner() -> None:
     binance = BinanceClient()
     mexc = MexcClient()
     mcap_client = CoinPaprikaClient()
+    _runner_state["binance"] = binance
+    _runner_state["mexc"] = mexc
     try:
         _store.bg_started_at = datetime.now(timezone.utc)
         loop.create_task(_fast_loop(_store, binance, mexc))
