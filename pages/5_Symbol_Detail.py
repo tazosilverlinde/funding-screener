@@ -1,0 +1,529 @@
+"""Page 5 — Per-symbol detail view.
+
+Opened via clickable symbol cells on every other page. Reads `?exchange=&symbol=`
+from the URL. Shows every metric we have for that single contract, with an
+explanation comment and a directional signal for each section so the user can
+understand *why* a signal lights up rather than guessing.
+
+Sections:
+  1. Header  — symbol, exchange, top-of-page signal banner, price/ATH/mcap metrics
+  2. Funding — current rate + streak + history + comment + signal
+  3. Risk    — mark/index spread, Open Interest + Δ, Long/Short ratio (Binance) + signal
+  4. Price action — 1d/7d/30d returns, drawdown, daily kline chart
+  5. Volume profile — today/yesterday/day-before quote volumes
+  6. Market context — fees, interval, next funding, market cap rank
+
+Cached cache reads are instant; OI history + L/S ratio are fetched on-demand
+once per session for Binance symbols only (MEXC doesn't expose these publicly).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from funding_screener.exchanges import BinanceClient  # noqa: E402
+from funding_screener.signals import classify_signal  # noqa: E402
+from funding_screener.streamlit_helpers import (  # noqa: E402
+    auto_rerun,
+    boot,
+    minutes_to,
+    run_async,
+    sidebar_status,
+)
+
+st.set_page_config(page_title="Symbol Detail", layout="wide")
+
+store = boot()
+sidebar_status(store)
+auto_rerun(interval_ms=60_000, key="detail_tick")
+
+
+# ---------------- query params ----------------
+
+params = st.query_params
+exchange_raw = params.get("exchange", "").lower()
+symbol_q = params.get("symbol", "")
+
+if exchange_raw == "binance":
+    exchange = "Binance"
+elif exchange_raw == "mexc":
+    exchange = "MEXC"
+else:
+    exchange = ""
+
+if not exchange or not symbol_q:
+    st.title("Symbol Detail")
+    st.info(
+        "This page shows the full picture for one perpetual contract: "
+        "funding, streak, mark vs index, open interest, long/short ratio, "
+        "price action, and volume — each with an explanation and a signal.\n\n"
+        "Open it by clicking a symbol on any other page, or pick manually:"
+    )
+    cols = st.columns([1, 3, 1])
+    ex_in = cols[0].selectbox("Exchange", ["Binance", "MEXC"], key="ex_in")
+    sym_in = cols[1].text_input(
+        "Symbol",
+        placeholder="BTCUSDT" if ex_in == "Binance" else "BTC_USDT",
+        key="sym_in",
+    )
+    if cols[2].button("Show", use_container_width=True) and sym_in:
+        st.query_params["exchange"] = ex_in
+        st.query_params["symbol"] = sym_in.strip()
+        st.rerun()
+    st.stop()
+
+
+# ---------------- read cached data ----------------
+
+snap = store.read_binance() if exchange == "Binance" else store.read_mexc()
+funding_row = next((r for r in snap.funding if r.symbol == symbol_q), None)
+contract = next((c for c in snap.contracts if c.symbol == symbol_q), None)
+klines = snap.klines.get(symbol_q, [])
+enrichment = store.read_enrichments().get((exchange, symbol_q))
+volume_24h_raw = snap.volumes.get(symbol_q)
+market_caps = store.read_market_caps()
+
+if funding_row is None and contract is None:
+    st.title(f"{symbol_q} — {exchange}")
+    st.error(
+        f"Symbol `{symbol_q}` is not in the {exchange} cache. Either the contract "
+        "doesn't exist or the background updater hasn't fetched yet — wait ~30s and refresh."
+    )
+    st.stop()
+
+base_asset = (funding_row.base_asset if funding_row else contract.base_asset).upper()
+mcap_usd = market_caps.get(base_asset)
+
+
+# ---------------- on-demand: OI history + L/S ratio (Binance only) ----------------
+
+
+@st.cache_data(ttl=120, show_spinner="Fetching open-interest and long/short ratio…")
+def _binance_extras(symbol: str) -> dict:
+    async def _go():
+        client = BinanceClient()
+        try:
+            results = await asyncio.gather(
+                client.fetch_open_interest_history(symbol, period="1h", limit=24),
+                client.fetch_long_short_ratio_global(symbol, period="1h", limit=1),
+                client.fetch_long_short_ratio_top(symbol, period="1h", limit=1),
+                return_exceptions=True,
+            )
+        finally:
+            await client.aclose()
+        return {
+            "oi_history": results[0] if not isinstance(results[0], Exception) else [],
+            "ls_global": results[1] if not isinstance(results[1], Exception) else None,
+            "ls_top": results[2] if not isinstance(results[2], Exception) else None,
+        }
+
+    return run_async(_go)
+
+
+if exchange == "Binance":
+    extras = _binance_extras(symbol_q)
+else:
+    extras = {"oi_history": [], "ls_global": None, "ls_top": None}
+
+
+# ---------------- compute top-line numbers ----------------
+
+current_price = klines[-1].close if klines else (funding_row.mark_price if funding_row else None)
+ath = max((k.high for k in klines), default=None) if klines else None
+drawdown_pct = ((current_price / ath - 1.0) * 100.0) if (ath and current_price) else None
+
+# Top signal: the same one Page 2 shows for this row.
+sig = classify_signal(
+    funding_8h_norm_pct=funding_row.rate_8h_norm_percent if funding_row else None,
+    streak_count=enrichment.funding_streak_count if enrichment else 0,
+    streak_direction=enrichment.funding_streak_direction if enrichment else None,
+    mark_index_spread_pct=enrichment.mark_index_spread_percent if enrichment else None,
+)
+
+
+# ---------------- HEADER ----------------
+
+st.title(f"{symbol_q} — {exchange}")
+st.caption(f"Base asset: **{base_asset}** • Quote: **{(contract.quote_asset if contract else 'USDT')}**")
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Price", f"{current_price:,.6g}" if current_price else "—")
+if ath and current_price:
+    m2.metric("ATH (1y lookback)", f"{ath:,.6g}", f"{drawdown_pct:+.2f}% from ATH")
+else:
+    m2.metric("ATH (1y lookback)", "—")
+if mcap_usd:
+    if mcap_usd >= 1e9:
+        m3.metric("Market cap (CoinGecko)", f"${mcap_usd / 1e9:.2f}B")
+    else:
+        m3.metric("Market cap (CoinGecko)", f"${mcap_usd / 1e6:.1f}M")
+else:
+    m3.metric("Market cap (CoinGecko)", "—", help="Coin not in CoinGecko top-1000")
+m4.metric("Signal", f"{sig.emoji} {sig.short}")
+
+# Banner with full breakdown
+banner_text = f"**{sig.emoji} {sig.short}**\n\n{sig.breakdown}"
+if sig.color == "green":
+    st.success(banner_text)
+elif sig.color == "red":
+    st.error(banner_text)
+elif sig.color == "orange":
+    st.warning(banner_text)
+else:
+    st.info(banner_text)
+
+st.divider()
+
+
+# ---------------- 1. FUNDING ----------------
+
+st.subheader("1. Funding")
+
+if funding_row:
+    f1, f2, f3 = st.columns(3)
+    f1.metric(
+        "Current rate (per period)",
+        f"{funding_row.rate_percent:+.4f}%",
+        help="Funding rate that will be paid/received at the next settlement. Positive = longs pay shorts.",
+    )
+    f2.metric(
+        "8h-normalized rate",
+        f"{funding_row.rate_8h_norm_percent:+.4f}%",
+        help="Rate scaled to an 8h period for cross-pair comparison.",
+    )
+    f3.metric(
+        "Funding interval",
+        f"{funding_row.interval_hours:.0f}h",
+        help="How often funding settles. Common: 8h. Some: 4h, 2h, 1h.",
+    )
+
+    f4, f5 = st.columns(2)
+    nf = funding_row.next_funding_time
+    f4.metric(
+        "Next funding in",
+        minutes_to(nf) or "—",
+        help="Time remaining until the current rate settles. Format: '47m' or '2h 15m'.",
+    )
+    if enrichment and enrichment.funding_streak_count:
+        arrow = "↑" if enrichment.funding_streak_direction == "pos" else "↓"
+        f5.metric(
+            "Streak",
+            f"{enrichment.funding_streak_count}{arrow}",
+            help="Consecutive same-sign settled rates from most recent.",
+        )
+    else:
+        f5.metric("Streak", "pending", help="Waiting for enrichment loop to fetch funding history…")
+
+    if enrichment and enrichment.prev_funding_rates_percent:
+        st.write("**Last settled rates** (most-recent first):")
+        hist_df = pd.DataFrame(
+            {
+                "Period (most-recent → older)": [f"t-{i+1}" for i in range(len(enrichment.prev_funding_rates_percent))],
+                "Rate %": enrichment.prev_funding_rates_percent,
+            }
+        )
+        st.dataframe(hist_df, hide_index=True, use_container_width=False)
+
+    # Explanation
+    f_pct = funding_row.rate_8h_norm_percent
+    if f_pct > 0.5:
+        explanation = (
+            "💡 **Positive funding** means **longs are paying shorts**. "
+            "If you're a shorts-only screener, this contract is paying you to be short. "
+            "But high positive funding *and* a price uptrend often means longs are over-leveraged "
+            "chasing the move — late-cycle / mean-revert candidate."
+        )
+    elif f_pct < -0.5:
+        explanation = (
+            "💡 **Negative funding** means **shorts are paying longs**. "
+            "Going long this contract collects funding while you wait. "
+            "High negative funding *and* a downtrend = shorts over-leveraged → squeeze candidate."
+        )
+    else:
+        explanation = (
+            "💡 Funding within ±0.5% per 8h is normal. No directional pressure from funding alone — "
+            "look at price action and OI to decide."
+        )
+    st.markdown(explanation)
+
+    # Section signal
+    section_sig = classify_signal(
+        funding_8h_norm_pct=funding_row.rate_8h_norm_percent,
+        streak_count=enrichment.funding_streak_count if enrichment else 0,
+        streak_direction=enrichment.funding_streak_direction if enrichment else None,
+        mark_index_spread_pct=None,  # mark/idx is handled in the Risk section
+    )
+    st.markdown(f"**Funding signal:** {section_sig.emoji} {section_sig.short}")
+else:
+    st.info("Funding data not yet cached for this symbol.")
+
+st.divider()
+
+
+# ---------------- 2. RISK METRICS ----------------
+
+st.subheader("2. Risk metrics")
+
+if exchange == "Binance":
+    r1, r2, r3, r4 = st.columns(4)
+    if enrichment and enrichment.mark_index_spread_percent is not None:
+        spread = enrichment.mark_index_spread_percent
+        r1.metric(
+            "Mark vs Index",
+            f"{spread:+.4f}%",
+            delta="Risk" if abs(spread) > 0.5 else "OK",
+            delta_color="inverse" if abs(spread) > 0.5 else "normal",
+            help="Mark price drives liquidations; index is the spot reference. Big spread = risk.",
+        )
+    else:
+        r1.metric("Mark vs Index", "—")
+
+    oi_hist = extras.get("oi_history") or []
+    if oi_hist:
+        try:
+            current_oi_usd = float(oi_hist[-1].get("sumOpenInterestValue", 0))
+            if len(oi_hist) >= 24:
+                old_oi_usd = float(oi_hist[0].get("sumOpenInterestValue", 0))
+                oi_24h_pct = (current_oi_usd / old_oi_usd - 1.0) * 100.0 if old_oi_usd > 0 else None
+            else:
+                oi_24h_pct = None
+            oi_label = (
+                f"${current_oi_usd / 1e9:.2f}B"
+                if current_oi_usd >= 1e9
+                else f"${current_oi_usd / 1e6:.1f}M"
+            )
+            r2.metric(
+                "Open Interest",
+                oi_label,
+                f"{oi_24h_pct:+.2f}% 24h" if oi_24h_pct is not None else None,
+                help="Total notional in this perp. Rising = real money entering. Falling = unwind.",
+            )
+        except Exception:
+            r2.metric("Open Interest", "—")
+    else:
+        r2.metric("Open Interest", "—")
+
+    ls_global = extras.get("ls_global")
+    r3.metric(
+        "L/S ratio (retail)",
+        f"{ls_global:.2f}" if ls_global is not None else "—",
+        help="Global account long/short ratio. > 2 = crowded long; < 0.5 = crowded short. Contrarian at extremes.",
+    )
+
+    ls_top = extras.get("ls_top")
+    r4.metric(
+        "L/S ratio (top traders)",
+        f"{ls_top:.2f}" if ls_top is not None else "—",
+        help="Top-20%-by-collateral account L/S ratio. Compare to retail — divergence = smart vs dumb money.",
+    )
+
+    # Risk explanation
+    risk_msgs: list[str] = []
+    risk_color = "neutral"
+    if enrichment and enrichment.mark_index_spread_percent is not None and abs(enrichment.mark_index_spread_percent) > 0.5:
+        risk_msgs.append("⚠️ Mark/Index spread is large — possible liquidation cascade or manipulation.")
+        risk_color = "warning"
+    if oi_hist:
+        try:
+            cur = float(oi_hist[-1].get("sumOpenInterestValue", 0))
+            if len(oi_hist) >= 24:
+                old = float(oi_hist[0].get("sumOpenInterestValue", 0))
+                oi_change = (cur / old - 1.0) * 100.0 if old > 0 else 0
+                if oi_change > 20:
+                    risk_msgs.append(f"📈 OI surged +{oi_change:.1f}% in 24h — fresh leverage entering.")
+                elif oi_change < -20:
+                    risk_msgs.append(f"📉 OI dropped {oi_change:.1f}% in 24h — unwind / position cleanup.")
+        except Exception:
+            pass
+    if ls_global is not None:
+        if ls_global > 3:
+            risk_msgs.append(f"🔴 Retail extremely long ({ls_global:.2f}). Contrarian: shorts may benefit.")
+        elif ls_global < 0.4:
+            risk_msgs.append(f"🟢 Retail extremely short ({ls_global:.2f}). Contrarian: squeeze risk for shorts.")
+    if ls_top is not None and ls_global is not None:
+        if ls_top < 1 < ls_global:
+            risk_msgs.append("⚠️ Top traders short while retail long — smart money positioned against retail.")
+        elif ls_global < 1 < ls_top:
+            risk_msgs.append("✅ Top traders long while retail short — smart money on the other side.")
+
+    if risk_msgs:
+        joined = "  \n".join(risk_msgs)
+        if risk_color == "warning":
+            st.warning(joined)
+        else:
+            st.info(joined)
+    else:
+        st.markdown(
+            "💡 **No risk flags right now.** Mark/index in line, OI stable, L/S ratio in normal range."
+        )
+else:
+    st.info(
+        "MEXC's public API doesn't expose mark/index spread, OI history, or L/S ratio for individual contracts. "
+        "Risk metrics shown only for Binance symbols."
+    )
+
+st.divider()
+
+
+# ---------------- 3. PRICE ACTION ----------------
+
+st.subheader("3. Price action")
+
+if klines:
+    closes = [k.close for k in klines]
+    times = [k.open_time for k in klines]
+
+    def _pct(days_ago: int) -> float | None:
+        idx = len(closes) - 1 - days_ago
+        if idx < 0 or closes[idx] <= 0:
+            return None
+        return (closes[-1] / closes[idx] - 1.0) * 100.0
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("1d %", f"{_pct(1):+.2f}%" if _pct(1) is not None else "—")
+    p2.metric("7d %", f"{_pct(7):+.2f}%" if _pct(7) is not None else "—")
+    p3.metric("30d %", f"{_pct(30):+.2f}%" if _pct(30) is not None else "—")
+    p4.metric("Distance from ATH", f"{drawdown_pct:+.2f}%" if drawdown_pct is not None else "—")
+
+    # Daily close chart — last 90 days
+    chart_n = min(90, len(klines))
+    chart_df = pd.DataFrame(
+        {"close": closes[-chart_n:]},
+        index=pd.to_datetime([k.open_time for k in klines[-chart_n:]]),
+    )
+    st.line_chart(chart_df, height=250)
+    st.caption(f"Last {chart_n} daily closes.")
+
+    # Explanation
+    pct30 = _pct(30) or 0
+    if pct30 > 200:
+        st.markdown(
+            "💡 **Massive 30-day rise** — suggests either a recent listing pump, narrative-driven mania, "
+            "or fundamental change. Combine with funding sign: high positive funding = late longs, lower-quality "
+            "rally; deep negative funding = shorts wrong, structural rally."
+        )
+    elif pct30 < -50:
+        st.markdown(
+            "💡 **Heavy 30-day decline** — capitulation territory. Watch for funding flips negative + "
+            "OI declining = short interest peaking → bottoming setup."
+        )
+    elif drawdown_pct is not None and drawdown_pct < -50:
+        st.markdown(
+            f"💡 **{drawdown_pct:.0f}% off the 1-year high.** Significant drawdown — could be "
+            "consolidation phase or trend continuation."
+        )
+    else:
+        st.markdown("💡 Price action within normal volatility band over the cached history.")
+else:
+    st.info("No klines cached yet for this symbol — the slow loop fetches them every 5 min.")
+
+st.divider()
+
+
+# ---------------- 4. VOLUME PROFILE ----------------
+
+st.subheader("4. Volume profile")
+
+if klines and len(klines) >= 3:
+
+    def _qv(idx: int) -> float | None:
+        if abs(idx) > len(klines):
+            return None
+        return klines[idx].quote_volume / 1e6
+
+    today_v = _qv(-1)
+    yest_v = _qv(-2)
+    before_v = _qv(-3)
+
+    v1, v2, v3, v4 = st.columns(4)
+    v1.metric(
+        "24h ticker (rolling)",
+        f"{volume_24h_raw / 1e6:.2f}M" if volume_24h_raw else "—",
+        help="From the 24h ticker endpoint. Continuously rolling 24h window.",
+    )
+    v2.metric("Today (so far)", f"{today_v:.2f}M" if today_v is not None else "—",
+              help="Newest daily kline's quote volume — incomplete day.")
+    v3.metric("Yesterday", f"{yest_v:.2f}M" if yest_v is not None else "—")
+    v4.metric("Day before", f"{before_v:.2f}M" if before_v is not None else "—")
+
+    # Tiny bar chart of last 14 days quote volume
+    chart_n = min(14, len(klines))
+    vol_df = pd.DataFrame(
+        {"quote_volume_M": [k.quote_volume / 1e6 for k in klines[-chart_n:]]},
+        index=pd.to_datetime([k.open_time for k in klines[-chart_n:]]),
+    )
+    st.bar_chart(vol_df, height=200)
+    st.caption(f"Last {chart_n} daily quote volumes (in millions USDT).")
+
+    # Volume momentum signal
+    if today_v and yest_v:
+        ratio = today_v / yest_v
+        if ratio > 1.5:
+            st.markdown(f"💡 Today's volume is **{ratio:.1f}× yesterday** — interest accelerating.")
+        elif ratio < 0.5:
+            st.markdown(f"💡 Today's volume is only **{ratio:.1f}× yesterday** — interest fading.")
+        else:
+            st.markdown("💡 Volume in line with recent days.")
+else:
+    st.info("Not enough kline history to break down per-day volumes yet.")
+
+st.divider()
+
+
+# ---------------- 5. MARKET CONTEXT ----------------
+
+st.subheader("5. Market context")
+
+c1, c2, c3, c4 = st.columns(4)
+if contract:
+    c1.metric(
+        "Maker fee",
+        f"{contract.maker_fee_percent:.4f}%",
+        help="Per-contract maker fee. Used in arb calculations: 4 × this for round trip on a paired position.",
+    )
+    c2.metric(
+        "Taker fee",
+        f"{contract.taker_fee_percent:.4f}%",
+        help="Per-contract taker fee.",
+    )
+else:
+    c1.metric("Maker fee", "—")
+    c2.metric("Taker fee", "—")
+
+if funding_row:
+    c3.metric("Funding interval", f"{funding_row.interval_hours:.0f}h")
+    nf = funding_row.next_funding_time
+    c4.metric("Next funding in", minutes_to(nf) or "—")
+else:
+    c3.metric("Funding interval", "—")
+    c4.metric("Next funding in", "—")
+
+if mcap_usd:
+    st.markdown(
+        f"**Market cap:** ${mcap_usd / 1e9:.2f}B (CoinGecko top-1000) — "
+        "compare to similar-sized peers to gauge whether the move is normal or exceptional."
+    )
+else:
+    st.markdown(
+        "**Market cap:** not in CoinGecko top-1000. Likely a smaller / newer coin — bigger % moves are normal."
+    )
+
+st.divider()
+
+
+# ---------------- footer ----------------
+
+st.markdown(
+    f"_Detail page for **{symbol_q}** ({exchange}). Data refreshes from the background updater every 30–180s; "
+    "Open Interest and Long/Short ratio are fetched live with a 2-minute cache._"
+)

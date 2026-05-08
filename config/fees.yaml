@@ -1,0 +1,29 @@
+# Maker fees in percent (so 0.02 means 0.02%, not 2%).
+# These feed the arb math (round-trip fees = 4 × maker_fee).
+#
+# Binance has no public per-symbol fee endpoint (commissionRate requires auth),
+# so we look up the fee in this priority order:
+#   1. futures_maker_by_symbol[<symbol>]   — exact match wins
+#   2. futures_maker_by_quote[<quote>]     — applies to all pairs of that quote
+#   3. futures_maker                        — fallback default
+# Same priority order applies to taker fees.
+#
+# DEFAULTS BELOW: USDT pairs use 0.02% maker (default tier); USDC pairs use 0%
+# because Binance has been running a 0% maker-fee promotion on USDC perpetuals.
+# Adjust if your VIP tier differs or the promotion ends.
+# Reference: https://www.binance.com/en/fee/futureFee
+binance:
+  futures_maker: 0.02
+  futures_taker: 0.05
+  futures_maker_by_quote:
+    USDC: 0.00
+  futures_taker_by_quote:
+    USDC: 0.015
+  futures_maker_by_symbol: {}    # e.g. BTCUSDT: 0.018
+  futures_taker_by_symbol: {}
+
+# MEXC's fees are pulled per-contract from /api/v1/contract/detail (makerFeeRate).
+# These values are fallbacks only if the per-contract field is missing.
+mexc:
+  futures_maker: 0.00
+  futures_taker: 0.02

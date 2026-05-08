@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.streamlit/secrets.toml
+*.log
+.idea/
+.vscode/
+dist/
+build/
+*.egg-info/
+.cache/
+.mypy_cache/
+# Local Claude Code permissions (the skills/agents under .claude/ DO get committed)
+.claude/settings.local.json
+# Debug artifacts
+response.json
+*.tmp
+# OS junk
+.DS_Store
+Thumbs.db

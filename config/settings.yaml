@@ -1,0 +1,48 @@
+# Tunable knobs. The Streamlit UI reads these on each rerun.
+
+row_limit: 20
+
+high_funding:
+  # Absolute 8h-normalized funding rate threshold, in percent.
+  # 1.0 means flag any pair whose abs(rate_8h_norm) > 1.0%.
+  threshold_percent: 1.0
+  # Sides (per exchange) with 24h quote volume below this USD value are treated
+  # as ABSENT — that exchange's columns will show as blank for that row.
+  # If both sides fall below, the row is dropped entirely.
+  # Set to 0 to disable. Default 1,000,000 ($1M) hides truly dead contracts
+  # (e.g. listed but unused USDC perps that show <$1M/24h).
+  min_24h_volume_usd_per_side: 1000000
+
+price_rise:
+  # Close-to-close pct change threshold over each window.
+  # 500.0 means flag any pair whose 1d, 7d, or 30d return > 500%.
+  threshold_percent: 500.0
+  windows_days: [1, 7, 30]
+  # Optional 24h quote-volume floor (USDT) so we don't surface untradeable scams.
+  # Set to 0 to disable.
+  min_24h_quote_volume: 100000
+  # How many daily klines to fetch per symbol. Used for ATH (max high) and the
+  # 1d/7d/30d returns. Stays at 365 to keep Binance's per-request weight at 2
+  # (limit >= 500 jumps to weight 5; limit > 1000 to weight 10, which auto-bans
+  # us with HTTP 418 on bursts). For coins listed >1y ago, the "ATH" we report
+  # is effectively a 1-year high.
+  kline_history_days: 365
+  # Cap on symbols we fetch klines for (selected by 24h volume). Multiplied by
+  # row_limit. With row_limit=20 and multiplier=3, we fetch klines for 60
+  # symbols on each exchange every slow loop.
+  kline_candidate_multiplier: 3
+
+usdt_usdc_arb:
+  # Optional: only show pairs whose two funding times are within this many minutes.
+  # Set to null to disable. The Java reference used 2.
+  funding_time_skew_minutes: null
+
+cache_ttl_seconds:
+  funding: 60
+  klines: 300
+  exchange_info: 3600
+  contract_detail: 3600
+
+http:
+  timeout_seconds: 15
+  max_retries: 2

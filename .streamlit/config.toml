@@ -1,0 +1,20 @@
+# Streamlit configuration for Cloud deployment.
+# Locally: this is read by `streamlit run` automatically.
+# Cloud:   Streamlit Community Cloud also picks it up.
+
+[server]
+# headless avoids the browser auto-open prompt; required on Cloud.
+headless = true
+# Wide layout-friendly default. Pages set their own page_config too.
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# Mild dark-friendly palette. Comment out to use Streamlit defaults.
+primaryColor = "#4ea1d3"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1c1f26"
+textColor = "#e6e6e6"
+font = "sans serif"
