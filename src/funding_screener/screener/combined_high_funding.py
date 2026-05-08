@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow
-from ..signals import classify_signal
+from ..signals import classify_signal, compute_composite_score
 
 _QUOTES = ("USDT", "USDC")
 
@@ -47,6 +47,7 @@ def screen_combined_high_funding(
     binance_volumes: Optional[dict[str, float]] = None,
     mexc_volumes: Optional[dict[str, float]] = None,
     min_volume_usd_per_side: float = 0.0,
+    onchain_netflow_by_base: Optional[dict[str, float]] = None,
 ) -> list[CombinedFundingRow]:
     bnb = _index_by_base_quote(binance_rows)
     mxc = _index_by_base_quote(mexc_rows)
@@ -54,6 +55,7 @@ def screen_combined_high_funding(
     mxc_contracts_by_sym = _index_contracts(mexc_contracts)
     binance_volumes = binance_volumes or {}
     mexc_volumes = mexc_volumes or {}
+    onchain_netflow_by_base = onchain_netflow_by_base or {}
     keys = set(bnb.keys()) | set(mxc.keys())
 
     out: list[CombinedFundingRow] = []
@@ -122,6 +124,18 @@ def screen_combined_high_funding(
             mark_index_spread_pct=sig_spread,
         )
 
+        # Composite score uses every available input.
+        composite = compute_composite_score(
+            funding_8h_norm_pct=sig_funding,
+            streak_count=sig_streak_count,
+            streak_direction=sig_streak_dir,
+            mark_index_spread_pct=sig_spread,
+            oi_change_24h_pct=b_enr.oi_change_24h_pct if b_enr else None,
+            ls_ratio_global=b_enr.ls_ratio_global if b_enr else None,
+            ls_ratio_top=b_enr.ls_ratio_top if b_enr else None,
+            onchain_net_usd=onchain_netflow_by_base.get(base),
+        )
+
         b_vol = binance_volumes.get(b.symbol) if b else None
         m_vol = mexc_volumes.get(m.symbol) if m else None
 
@@ -155,6 +169,10 @@ def screen_combined_high_funding(
                 signal_short=signal.short,
                 signal_breakdown=signal.breakdown,
                 signal_color=signal.color,
+                composite_score=composite.score,
+                composite_emoji=composite.emoji,
+                composite_short=composite.short,
+                composite_breakdown="\n".join(composite.breakdown),
             )
         )
     out.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)

@@ -32,7 +32,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from funding_screener.exchanges import BinanceClient  # noqa: E402
-from funding_screener.signals import classify_signal  # noqa: E402
+from funding_screener.signals import classify_signal, compute_composite_score  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
@@ -150,6 +150,22 @@ sig = classify_signal(
     mark_index_spread_pct=enrichment.mark_index_spread_percent if enrichment else None,
 )
 
+# Composite numeric score using every available input.
+onchain_flows_list, _ = store.read_onchain_flows()
+onchain_net = next(
+    (f.get("net_usd") for f in onchain_flows_list if f.get("token") == base_asset), None
+)
+composite = compute_composite_score(
+    funding_8h_norm_pct=funding_row.rate_8h_norm_percent if funding_row else None,
+    streak_count=enrichment.funding_streak_count if enrichment else 0,
+    streak_direction=enrichment.funding_streak_direction if enrichment else None,
+    mark_index_spread_pct=enrichment.mark_index_spread_percent if enrichment else None,
+    oi_change_24h_pct=enrichment.oi_change_24h_pct if enrichment else None,
+    ls_ratio_global=enrichment.ls_ratio_global if enrichment else None,
+    ls_ratio_top=enrichment.ls_ratio_top if enrichment else None,
+    onchain_net_usd=onchain_net,
+)
+
 
 # ---------------- HEADER ----------------
 
@@ -169,7 +185,12 @@ if mcap_usd:
         m3.metric("Market cap (CoinGecko)", f"${mcap_usd / 1e6:.1f}M")
 else:
     m3.metric("Market cap (CoinGecko)", "—", help="Coin not in CoinGecko top-1000")
-m4.metric("Signal", f"{sig.emoji} {sig.short}")
+m4.metric(
+    "Score",
+    f"{composite.score:+d}",
+    f"{composite.emoji} {composite.short}",
+    help="Composite signal score (-100..+100). Positive = long bias. See breakdown below.",
+)
 
 # Banner with full breakdown
 banner_text = f"**{sig.emoji} {sig.short}**\n\n{sig.breakdown}"
@@ -181,6 +202,11 @@ elif sig.color == "orange":
     st.warning(banner_text)
 else:
     st.info(banner_text)
+
+# Composite score breakdown
+with st.expander(f"Composite score breakdown ({composite.score:+d} {composite.emoji} {composite.short})"):
+    for line in composite.breakdown:
+        st.write(f"• {line}")
 
 st.divider()
 

@@ -99,3 +99,20 @@ with st.expander("Configuration", expanded=False):
     st.json(settings(), expanded=False)
     st.write("**Fees (`config/fees.yaml`)**")
     st.json(fees(), expanded=False)
+
+# Telegram status banner — show only on landing page.
+import os  # noqa: E402
+_tg_token = bool(os.getenv("TELEGRAM_BOT_TOKEN"))
+_tg_chat = bool(os.getenv("TELEGRAM_CHAT_ID"))
+if _tg_token and _tg_chat:
+    st.success(
+        "🔔 **Telegram alerts: configured.** Alert thresholds are in `config/alerts.yaml`. "
+        "Alerts fire on transitions (off→on) only, with a 4h cooldown per "
+        "(alert_type, symbol)."
+    )
+else:
+    st.info(
+        "🔕 **Telegram alerts: not configured.** Set `TELEGRAM_BOT_TOKEN` and "
+        "`TELEGRAM_CHAT_ID` env vars to enable. Setup instructions are in "
+        "`config/alerts.yaml`. The screener works without alerts — they're additive."
+    )

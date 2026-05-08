@@ -25,17 +25,20 @@ from funding_screener.screener import screen_combined_high_funding  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    filter_dataframe_to_watchlist,
     freshness_banner,
     minutes_to,
     render_table,
     sidebar_status,
     to_df,
+    watchlist_sidebar,
 )
 
 st.set_page_config(page_title="High Funding (combined)", layout="wide")
 
 store = boot()
 sidebar_status(store)
+watchlist = watchlist_sidebar()
 auto_rerun(interval_ms=30_000, key="page2_tick")
 
 cfg = settings()
@@ -59,6 +62,8 @@ st.divider()
 binance = store.read_binance()
 mexc = store.read_mexc()
 enrichments = store.read_enrichments()
+onchain_flows, _ = store.read_onchain_flows()
+onchain_by_base: dict[str, float] = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
 rows = screen_combined_high_funding(
     binance.funding,
     mexc.funding,
@@ -69,12 +74,16 @@ rows = screen_combined_high_funding(
     binance_volumes=binance.volumes,
     mexc_volumes=mexc.volumes,
     min_volume_usd_per_side=min_volume_per_side,
+    onchain_netflow_by_base=onchain_by_base,
 )
 
 cap = int(cfg["row_limit"])
 df = to_df(
     [r.model_dump() for r in rows[:cap]],
     column_order=[
+        "composite_score",
+        "composite_emoji",
+        "composite_short",
         "signal_emoji",
         "signal_short",
         "base_asset",
@@ -104,11 +113,18 @@ df = to_df(
 )
 
 if not df.empty:
+    # Composite Score column.
+    df["Score"] = df["composite_score"]
+    df["Score label"] = (
+        df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
+    )
+    df = df.drop(columns=["composite_score", "composite_emoji", "composite_short"])
     # Combine emoji + short label into one cell for compact display.
     df["Signal"] = df["signal_emoji"].fillna("") + " " + df["signal_short"].fillna("")
     df = df.drop(columns=["signal_emoji", "signal_short"])
-    # Move Signal to the front.
-    cols = ["Signal"] + [c for c in df.columns if c != "Signal"]
+    # Move Score + Signal to the front.
+    front = ["Score", "Score label", "Signal"]
+    cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
     # Make symbol columns clickable → detail page.
@@ -151,6 +167,29 @@ if not df.empty:
     )
     pct = "%.4f"
     col_cfg = {
+        "Score": st.column_config.NumberColumn(
+            "Score",
+            format="%+d",
+            help=(
+                "Composite signal score, signed [-100..+100]. **Positive = long bias**, "
+                "negative = short bias.\n\n"
+                "Combines: funding rate (±30), streak (±15), OI 24h Δ × funding direction (±15), "
+                "L/S ratio extremity (±10), smart-vs-retail divergence (±5), on-chain netflow (±15). "
+                "Mark/index divergence > 0.5% damps conviction by 50%.\n\n"
+                "Score thresholds:\n"
+                "  +70 .. +100 → 🚀 Strong bull\n"
+                "  +30 .. +70  → 🟢 Bullish\n"
+                "  +10 .. +30  → ↗ Mild bull\n"
+                "  -10 .. +10  → 🟡 Neutral\n"
+                "  -30 .. -10  → ↘ Mild bear\n"
+                "  -70 .. -30  → 🔴 Bearish\n"
+                "  -100 .. -70 → 💥 Strong bear"
+            ),
+        ),
+        "Score label": st.column_config.TextColumn(
+            "Score label",
+            help="Human-readable bucket of the composite score.",
+        ),
         "Signal": st.column_config.TextColumn(
             "Signal",
             help=(
@@ -306,9 +345,10 @@ if not df.empty:
             ),
         ),
     }
+    df = filter_dataframe_to_watchlist(df, watchlist, ["Binance symbol", "MEXC symbol"])
     render_table(df, column_config=col_cfg)
-    st.caption(
-        f"Showing top {len(df)} of {len(rows)} flagged pairs, sorted by max |8h-normalized rate|."
-    )
+    cap_msg = (f"watchlist of {len(watchlist)} symbols" if watchlist
+               else f"top {len(df)} of {len(rows)} flagged pairs")
+    st.caption(f"Showing {len(df)} rows ({cap_msg}), sorted by max |8h-normalized rate|.")
 else:
     st.info("No pair on either exchange currently exceeds the 8h-normalized funding threshold.")

@@ -16,16 +16,19 @@ from funding_screener.screener import screen_price_rise  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    filter_dataframe_to_watchlist,
     freshness_banner,
     render_table,
     sidebar_status,
     to_df,
+    watchlist_sidebar,
 )
 
 st.set_page_config(page_title="MEXC Price Rise", layout="wide")
 
 store = boot()
 sidebar_status(store)
+watchlist = watchlist_sidebar()
 auto_rerun(interval_ms=60_000, key="page4_tick")
 
 cfg = settings()["price_rise"]
@@ -140,8 +143,11 @@ if not df.empty:
             format="%.2f", help="Quote volume of the day before yesterday, in millions USDT."
         ),
     }
+    df = filter_dataframe_to_watchlist(df, watchlist, ["Symbol"])
     render_table(df, column_config=col_cfg)
-    st.caption(f"Showing top {len(df)} of {len(rows)} flagged pairs.")
+    cap_msg = (f"watchlist of {len(watchlist)} symbols" if watchlist
+               else f"top {len(df)} of {len(rows)} flagged pairs")
+    st.caption(f"Showing {len(df)} ({cap_msg}).")
 else:
     st.info(
         f"No MEXC pair currently exceeds the {threshold:.0f}% rise threshold. "

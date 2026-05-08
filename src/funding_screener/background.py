@@ -26,6 +26,16 @@ from .exchanges.mexc import MexcClient
 from .macro import DefiLlamaClient
 from .market_data import CoinPaprikaClient
 from .models import ContractInfo, EnrichmentData, FundingRow, Kline
+from .notifications import (
+    AlertState,
+    TelegramClient,
+    evaluate_composite_alerts,
+    evaluate_funding_alerts,
+    evaluate_new_listing_alerts,
+    evaluate_unlock_alerts,
+    evaluate_whale_flow_alerts,
+    load_alerts_config,
+)
 from .onchain import (
     EthOnchainClient,
     classify_netflow_signal,
@@ -35,7 +45,9 @@ from .onchain import (
     load_exchange_wallets,
     _BLOCKS_PER_24H,
 )
+from .screener.combined_high_funding import screen_combined_high_funding
 from .signals import compute_funding_streak
+from .unlocks import load_upcoming_unlocks
 
 log = logging.getLogger(__name__)
 
@@ -308,6 +320,99 @@ async def _macro_loop(store: DataStore, llama: DefiLlamaClient) -> None:
         except Exception as e:
             log.exception("macro loop error")
             store.record_error(f"macro: {type(e).__name__}: {e}")
+        await asyncio.sleep(interval)
+
+
+async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
+    """Telegram alerts on transition. Idempotent — safe to run unconfigured.
+
+    Reads `config/alerts.yaml` once per iteration so a config change applies
+    on the next cycle without restart.
+    """
+    interval = 60
+    state = AlertState()
+    seen_symbols: set[str] = set()  # for new-listing detection
+    first_iter = True
+    while True:
+        try:
+            cfg = (load_alerts_config() or {}).get("alerts") or {}
+            if not cfg.get("enabled", True) or not telegram.is_configured():
+                # Still iterate so a re-enabling flag takes effect, just don't fire.
+                await asyncio.sleep(interval)
+                continue
+            cooldown_s = float(cfg.get("cooldown_minutes", 240)) * 60.0
+
+            bnb = store.read_binance()
+            mxc = store.read_mexc()
+            enrichments = store.read_enrichments()
+            onchain_flows, _ = store.read_onchain_flows()
+
+            events: list[tuple[str, str, str]] = []
+
+            # Composite — uses already-computed rows from the screener.
+            try:
+                screener_threshold = 0.0  # don't pre-filter for alert evaluation
+                onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
+                combined_rows = screen_combined_high_funding(
+                    bnb.funding, mxc.funding,
+                    bnb.contracts, mxc.contracts,
+                    enrichments,
+                    threshold_percent=screener_threshold,
+                    binance_volumes=bnb.volumes, mexc_volumes=mxc.volumes,
+                    min_volume_usd_per_side=0.0,
+                    onchain_netflow_by_base=onchain_by_base,
+                )
+                if cfg.get("composite_score", {}).get("enabled", True):
+                    cs = cfg["composite_score"]
+                    events.extend(evaluate_composite_alerts(
+                        combined_rows,
+                        bull_threshold=int(cs.get("bullish_threshold", 70)),
+                        bear_threshold=int(cs.get("bearish_threshold", -70)),
+                    ))
+            except Exception as e:
+                log.warning("alerts: composite evaluator failed: %s", e)
+
+            # Funding rate threshold.
+            if cfg.get("funding_rate", {}).get("enabled", True):
+                thr = float(cfg["funding_rate"].get("threshold_pct_8h", 2.0))
+                events.extend(evaluate_funding_alerts(list(bnb.funding) + list(mxc.funding), thr))
+
+            # Whale flows.
+            if cfg.get("whale_flow", {}).get("enabled", True):
+                thr_usd = float(cfg["whale_flow"].get("threshold_usd", 20_000_000))
+                events.extend(evaluate_whale_flow_alerts(onchain_flows, thr_usd))
+
+            # New listings — skip the FIRST iteration so we don't fire one alert per existing contract.
+            if cfg.get("new_listing", {}).get("enabled", True):
+                listing_events, current = evaluate_new_listing_alerts(bnb.contracts, mxc.contracts, seen_symbols)
+                if not first_iter:
+                    events.extend(listing_events)
+                seen_symbols = current
+
+            # Token unlocks — read from YAML directly.
+            if cfg.get("token_unlock", {}).get("enabled", True):
+                tradable = {c.base_asset.upper() for c in bnb.contracts} | {c.base_asset.upper() for c in mxc.contracts}
+                upcoming = load_upcoming_unlocks(tradable_symbols=tradable)
+                days = int(cfg["token_unlock"].get("days_ahead", 3))
+                events.extend(evaluate_unlock_alerts(upcoming, days))
+
+            # Apply state machine: fire only on off→on transitions, send "resolved"
+            # only for previously-active keys.
+            for key, status, msg in events:
+                if status == "active":
+                    if state.should_fire(key, cooldown_s):
+                        ok = await telegram.send(msg)
+                        if ok:
+                            state.mark_fired(key)
+                elif status == "resolved":
+                    if key in state.active_keys:
+                        await telegram.send(msg)
+                        state.mark_resolved(key)
+
+        except Exception as e:
+            log.exception("alerts loop error")
+            store.record_error(f"alerts: {type(e).__name__}: {e}")
+        first_iter = False
         await asyncio.sleep(interval)
 
 
@@ -593,6 +698,7 @@ def _runner() -> None:
     mcap_client = CoinPaprikaClient()
     llama = DefiLlamaClient()
     eth_chain = EthOnchainClient()
+    telegram = TelegramClient()
     _runner_state["binance"] = binance
     _runner_state["mexc"] = mexc
     try:
@@ -603,6 +709,7 @@ def _runner() -> None:
         loop.create_task(_enrichment_loop(_store, binance, mexc))
         loop.create_task(_macro_loop(_store, llama))
         loop.create_task(_onchain_loop(_store, eth_chain))
+        loop.create_task(_alerts_loop(_store, telegram))
         loop.run_forever()
     finally:
         try:
@@ -610,6 +717,7 @@ def _runner() -> None:
                 asyncio.gather(
                     binance.aclose(), mexc.aclose(),
                     mcap_client.aclose(), llama.aclose(), eth_chain.aclose(),
+                    telegram.aclose(),
                     return_exceptions=True,
                 )
             )

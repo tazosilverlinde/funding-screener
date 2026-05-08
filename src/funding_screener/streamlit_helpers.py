@@ -60,6 +60,68 @@ def freshness_banner(store: DataStore) -> None:
         cols[2].success("Background updater healthy")
 
 
+def watchlist_sidebar() -> set[str]:
+    """Render the watchlist controls in the sidebar; return the set of upper-case
+    symbols the user has enabled. Empty set → no filtering.
+
+    Persists across page navigation via st.session_state.
+    """
+    st.sidebar.divider()
+    st.sidebar.header("Watchlist")
+    raw = st.sidebar.text_area(
+        "Symbols",
+        value=st.session_state.get("watchlist_input", ""),
+        key="watchlist_input",
+        placeholder="BTCUSDT, ARBUSDT, WIFUSDT",
+        help=(
+            "Comma- or newline-separated tickers (Binance or MEXC format). "
+            "Tickers not matching any contract are silently ignored."
+        ),
+        height=80,
+    )
+    enabled = st.sidebar.checkbox(
+        "Filter every page to watchlist only",
+        value=st.session_state.get("watchlist_enabled", False),
+        key="watchlist_enabled",
+        help="When checked, all tables on all pages show only these symbols.",
+    )
+    if not enabled or not raw.strip():
+        return set()
+    parts: set[str] = set()
+    # Tolerate commas, newlines, semicolons, whitespace.
+    for tok in raw.replace(",", "\n").replace(";", "\n").split("\n"):
+        s = tok.strip().upper()
+        if s:
+            parts.add(s)
+    return parts
+
+
+def filter_dataframe_to_watchlist(df, watchlist: set[str], symbol_columns: list[str]) -> "pd.DataFrame":
+    """Keep rows where ANY of the listed symbol columns matches the watchlist.
+
+    Each value in `symbol_columns` may itself be a string OR may be a clickable
+    `/Symbol_Detail?...&symbol=BTCUSDT` URL — we extract the trailing symbol.
+    """
+    if df.empty or not watchlist:
+        return df
+    import re
+    pat = re.compile(r"symbol=([A-Z0-9_]+)$", re.IGNORECASE)
+
+    def matches(row) -> bool:
+        for col in symbol_columns:
+            val = row.get(col)
+            if not isinstance(val, str) or not val:
+                continue
+            m = pat.search(val)
+            sym = (m.group(1) if m else val).upper()
+            if sym in watchlist:
+                return True
+        return False
+
+    mask = df.apply(matches, axis=1)
+    return df[mask]
+
+
 def sidebar_status(store: DataStore) -> None:
     """Render fees + freshness + manual refresh in the sidebar. Call once per page."""
     st.sidebar.header("Status")

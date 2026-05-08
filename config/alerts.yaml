@@ -1,0 +1,49 @@
+# Telegram alert thresholds.
+#
+# Setup (one-time, ~5 min):
+#   1. In Telegram, message @BotFather → /newbot → follow prompts → save the bot token.
+#   2. In Telegram, message @userinfobot → save your numeric user ID (the chat_id).
+#   3. Set env vars:
+#        TELEGRAM_BOT_TOKEN = "1234567890:ABCDEFG..."
+#        TELEGRAM_CHAT_ID   = "123456789"
+#      Locally: export them before `streamlit run`.
+#      Render:  Service → Environment → add both as plain env vars.
+#   4. (Optional) Adjust the thresholds below. Reduce them = more alerts.
+#
+# State machine: each alert fires only on TRANSITION (off→on). When the condition
+# clears, a "resolved" message fires. Cooldown prevents the same alert from firing
+# more than once per `cooldown_minutes` even if conditions oscillate.
+
+alerts:
+  enabled: true
+  cooldown_minutes: 240   # 4 hours per (alert_type, symbol) pair
+
+  # Composite score crossing extremes — biggest signal-to-noise.
+  composite_score:
+    enabled: true
+    bullish_threshold: 70   # alert when score >= 70
+    bearish_threshold: -70  # alert when score <= -70
+
+  # Funding rate crossing absolute threshold (8h-normalized).
+  funding_rate:
+    enabled: true
+    threshold_pct_8h: 2.0   # alert when |funding_8h_norm| > 2%
+
+  # Open Interest 24h surge.
+  oi_surge:
+    enabled: true
+    threshold_pct_24h: 50.0  # alert when |OI 24h Δ| > 50%
+
+  # Whale flow on Page 6 — alert when net netflow exceeds threshold (USD).
+  whale_flow:
+    enabled: true
+    threshold_usd: 20_000_000
+
+  # New listing detected (any new perp contract on Binance or MEXC).
+  new_listing:
+    enabled: true
+
+  # Token unlock approaching.
+  token_unlock:
+    enabled: true
+    days_ahead: 3            # alert when an unlock is within N days

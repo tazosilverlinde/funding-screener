@@ -134,6 +134,12 @@ class CombinedFundingRow(_Frozen):
     signal_breakdown: str
     signal_color: str
 
+    # Numeric composite score (signed [-100, +100]; positive = long bias).
+    composite_score: Optional[int] = None
+    composite_emoji: Optional[str] = None
+    composite_short: Optional[str] = None
+    composite_breakdown: Optional[str] = None  # newline-joined breakdown text
+
 
 class PriceRiseRow(_Frozen):
     """Output row for the close-to-close price-rise screener."""

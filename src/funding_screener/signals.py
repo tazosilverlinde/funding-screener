@@ -178,3 +178,137 @@ def classify_signal(
             "No clear directional bias from funding alone."
         ),
     )
+
+
+# ---------------- composite score ----------------
+
+
+@dataclass(frozen=True)
+class CompositeScore:
+    """Signed [-100, +100] composite. Positive = long bias; negative = short bias."""
+    score: int                  # -100..+100
+    emoji: str
+    short: str                  # 1-3 word label
+    color: str                  # green / red / gray
+    breakdown: list[str]        # itemized contributions, for tooltip
+
+
+def compute_composite_score(
+    *,
+    funding_8h_norm_pct: Optional[float] = None,
+    streak_count: int = 0,
+    streak_direction: Optional[StreakDirection] = None,
+    mark_index_spread_pct: Optional[float] = None,
+    oi_change_24h_pct: Optional[float] = None,
+    ls_ratio_global: Optional[float] = None,
+    ls_ratio_top: Optional[float] = None,
+    onchain_net_usd: Optional[float] = None,
+) -> CompositeScore:
+    """Combine all available signals into a single -100..+100 score.
+
+    Sign convention: **positive = bullish (favors long), negative = bearish (favors short)**.
+    Components and their max contribution:
+
+      | Component            | Range       | Logic |
+      |----------------------|-------------|-------|
+      | Funding rate         | ±30         | Negative funding (shorts pay longs) → positive score |
+      | Streak (3+)          | ±15         | Persistent same-sign reinforces direction |
+      | OI 24h Δ × funding   | ±15         | OI rising while shorts pay = strong bull |
+      | L/S ratio extreme    | ±10         | Crowded long → contrarian short |
+      | On-chain netflow     | ±15         | Withdrawals exceed deposits → bullish |
+      | Mark/Index spread    | -50% damp   | Big divergence reduces conviction (multiplicative) |
+      | Top-vs-retail L/S    | ±5          | Smart money against retail = small confirm |
+
+    Inputs may be None — score is computed from whatever's available.
+    """
+    contributions: list[str] = []
+    s = 0.0
+
+    # 1. Funding (±30)
+    if funding_8h_norm_pct is not None:
+        f = max(-2.0, min(2.0, funding_8h_norm_pct))  # clamp at ±2%
+        delta = -15.0 * f  # negative funding ⇒ +score
+        s += delta
+        contributions.append(f"funding {funding_8h_norm_pct:+.3f}%/8h → {delta:+.1f}")
+
+    # 2. Streak (±15)
+    if streak_count >= 3 and streak_direction:
+        delta = 15.0 if streak_direction == "neg" else -15.0
+        s += delta
+        contributions.append(f"streak {streak_count}× {streak_direction} → {delta:+.1f}")
+    elif streak_count == 2 and streak_direction:
+        delta = 7.5 if streak_direction == "neg" else -7.5
+        s += delta
+        contributions.append(f"streak {streak_count}× {streak_direction} → {delta:+.1f}")
+
+    # 3. OI 24h Δ × funding direction (±15)
+    if oi_change_24h_pct is not None and funding_8h_norm_pct is not None:
+        if abs(oi_change_24h_pct) > 5.0:
+            oi_clamped = max(-50.0, min(50.0, oi_change_24h_pct))
+            # OI rising while shorts pay = strong bull confirmation
+            if funding_8h_norm_pct < 0:
+                delta = 0.3 * oi_clamped
+            else:
+                delta = -0.3 * oi_clamped
+            s += delta
+            contributions.append(f"OI 24h Δ {oi_change_24h_pct:+.1f}% → {delta:+.1f}")
+
+    # 4. L/S ratio extreme (±10)
+    if ls_ratio_global is not None:
+        if ls_ratio_global > 3.0:
+            s -= 10.0
+            contributions.append(f"L/S retail {ls_ratio_global:.2f} (crowded long) → -10.0")
+        elif ls_ratio_global < 0.4:
+            s += 10.0
+            contributions.append(f"L/S retail {ls_ratio_global:.2f} (crowded short) → +10.0")
+
+    # 5. Top-trader vs retail divergence (±5)
+    if ls_ratio_global is not None and ls_ratio_top is not None:
+        if ls_ratio_top < 1.0 and ls_ratio_global > 1.5:
+            s -= 5.0
+            contributions.append("smart money short, retail long → -5.0")
+        elif ls_ratio_top > 1.0 and ls_ratio_global < 0.7:
+            s += 5.0
+            contributions.append("smart money long, retail short → +5.0")
+
+    # 6. On-chain netflow (±15)
+    if onchain_net_usd is not None and abs(onchain_net_usd) > 1_000_000:
+        net_clamped = max(-50_000_000.0, min(50_000_000.0, onchain_net_usd))
+        delta = 15.0 * (net_clamped / 50_000_000.0)
+        s += delta
+        sign = "withdrawals" if net_clamped > 0 else "deposits"
+        contributions.append(f"on-chain net ${onchain_net_usd:+,.0f} ({sign}) → {delta:+.1f}")
+
+    # 7. Mark/Index spread risk damping (multiplicative)
+    if mark_index_spread_pct is not None and abs(mark_index_spread_pct) > 0.5:
+        s *= 0.5
+        contributions.append(
+            f"mark/idx {mark_index_spread_pct:+.3f}% (risk) → ×0.5 conviction damp"
+        )
+
+    score = int(max(-100, min(100, round(s))))
+    emoji, short, color = _composite_label(score)
+    return CompositeScore(
+        score=score,
+        emoji=emoji,
+        short=short,
+        color=color,
+        breakdown=contributions or ["no inputs available"],
+    )
+
+
+def _composite_label(score: int) -> tuple[str, str, str]:
+    """Map score → (emoji, short label, color). Symmetric around zero."""
+    if score >= 70:
+        return ("🚀", "Strong bull", "green")
+    if score >= 30:
+        return ("🟢", "Bullish", "green")
+    if score >= 10:
+        return ("↗", "Mild bull", "green")
+    if score <= -70:
+        return ("💥", "Strong bear", "red")
+    if score <= -30:
+        return ("🔴", "Bearish", "red")
+    if score <= -10:
+        return ("↘", "Mild bear", "red")
+    return ("🟡", "Neutral", "gray")

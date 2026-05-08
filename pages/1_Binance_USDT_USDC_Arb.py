@@ -16,17 +16,20 @@ from funding_screener.screener import screen_usdt_usdc_arb  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    filter_dataframe_to_watchlist,
     freshness_banner,
     minutes_to,
     render_table,
     sidebar_status,
     to_df,
+    watchlist_sidebar,
 )
 
 st.set_page_config(page_title="Binance USDT/USDC Arb", layout="wide")
 
 store = boot()
 sidebar_status(store)
+watchlist = watchlist_sidebar()
 auto_rerun(interval_ms=30_000, key="page1_tick")
 
 st.title("Binance — USDT/USDC funding arbitrage")
@@ -166,7 +169,10 @@ if not df.empty:
             ),
         ),
     }
+    df = filter_dataframe_to_watchlist(df, watchlist, ["LONG leg", "SHORT leg"])
     render_table(df, column_config=cfg)
-    st.caption(f"Showing top {len(df)} of {len(rows)} qualifying pairs, sorted by 8h-normalized net %.")
+    cap_msg = (f"watchlist of {len(watchlist)} symbols" if watchlist
+               else f"top {len(df)} of {len(rows)} qualifying pairs")
+    st.caption(f"Showing {len(df)} pairs ({cap_msg}), sorted by 8h-normalized net %.")
 else:
     st.info("No USDT/USDC pair currently has positive net funding after fees on Binance.")
