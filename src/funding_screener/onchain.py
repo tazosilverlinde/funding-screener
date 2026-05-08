@@ -1,0 +1,316 @@
+"""Our own ETH on-chain exchange-flow tracker — no third-party labeling APIs.
+
+Computes 24h netflow per token to/from labeled exchange hot wallets:
+
+    deposits_usd     = Σ token transfers TO any of {our exchange wallets}
+    withdrawals_usd  = Σ token transfers FROM any of {our exchange wallets}
+    net_usd          = withdrawals_usd − deposits_usd     (positive = bullish)
+
+Filter: we only track tokens that have a USDT or USDC perp on Binance OR MEXC,
+so the screener stays focused on what the user can actually trade.
+
+Data sources:
+  - Public Ethereum JSON-RPC (default https://eth.llamarpc.com — free, no key)
+  - config/exchange_wallets.yaml — maintained list of CEX hot wallets
+  - config/eth_token_contracts.yaml — maintained ticker → ERC-20 contract map
+  - Token prices: pulled from the existing Binance/MEXC funding cache (mark price)
+
+Limitations:
+  - ETH chain only. SOL/BNB/native chains aren't covered.
+  - Internal exchange shuffling (Binance → Binance) is correctly cancelled out
+    if both addresses are in our list (counts as +deposit −withdrawal = 0 net).
+  - New CEXs and new wallets need to be added to YAML manually.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+import httpx
+import yaml
+
+from .config import settings
+
+# `Transfer(address indexed from, address indexed to, uint256 value)` event signature.
+_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# Multiple public RPCs — we fall through them on 429s / errors. All free, no keys.
+_DEFAULT_RPCS = [
+    "https://ethereum-rpc.publicnode.com",
+    "https://eth.drpc.org",
+    "https://cloudflare-eth.com",
+    "https://eth.llamarpc.com",
+    "https://rpc.ankr.com/eth",
+]
+# 24h on Ethereum at ~12s/block.
+_BLOCKS_PER_24H = 7200
+
+_log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TokenInfo:
+    symbol: str
+    address: str  # lowercase 0x...
+    decimals: int
+
+
+def _config_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "config"
+
+
+def _pad_address(addr: str) -> str:
+    """Convert a 20-byte address to a 32-byte topic-format value (0x-prefixed)."""
+    a = addr.lower().replace("0x", "")
+    return "0x" + ("0" * (64 - len(a))) + a
+
+
+def load_exchange_wallets() -> dict[str, list[str]]:
+    """Returns {exchange_name: [lowercase 0x addresses]} for the ETH chain."""
+    path = _config_dir() / "exchange_wallets.yaml"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    eth = (data.get("ethereum") or {})
+    out: dict[str, list[str]] = {}
+    for exchange, wallets in eth.items():
+        if not isinstance(wallets, list):
+            continue
+        out[exchange] = [w.lower() for w in wallets if isinstance(w, str)]
+    return out
+
+
+def load_eth_token_contracts() -> dict[str, TokenInfo]:
+    """Returns {SYMBOL_UPPER: TokenInfo} from config/eth_token_contracts.yaml."""
+    path = _config_dir() / "eth_token_contracts.yaml"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    eth = (data.get("ethereum") or {})
+    out: dict[str, TokenInfo] = {}
+    for sym, info in eth.items():
+        if not isinstance(info, dict):
+            continue
+        addr = info.get("address")
+        decimals = int(info.get("decimals", 18))
+        if not isinstance(addr, str):
+            continue
+        sym_u = sym.upper()
+        out[sym_u] = TokenInfo(symbol=sym_u, address=addr.lower(), decimals=decimals)
+    return out
+
+
+class EthOnchainClient:
+    """Minimal Ethereum JSON-RPC client.
+
+    Uses a list of public RPC endpoints (no API keys). Each request walks the
+    list and keeps trying the next one on 429 or transient error — gives us
+    surprisingly good uptime without any signup.
+    """
+
+    name = "EthOnchain"
+
+    def __init__(
+        self,
+        rpc_urls: list[str] | None = None,
+        http: httpx.AsyncClient | None = None,
+    ) -> None:
+        timeout = float(settings()["http"]["timeout_seconds"])
+        self._rpc_urls = list(rpc_urls or _DEFAULT_RPCS)
+        self._http = http or httpx.AsyncClient(timeout=max(timeout, 30.0))
+        self._owns_http = http is None
+        self._next_idx = 0  # round-robin starting point per request
+
+    async def aclose(self) -> None:
+        if self._owns_http:
+            await self._http.aclose()
+
+    async def _rpc(self, method: str, params: list) -> Any:
+        payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+        last_exc: Optional[Exception] = None
+        # Walk every RPC URL once; rotate the starting index so we don't hammer one node.
+        n = len(self._rpc_urls)
+        for offset in range(n):
+            url = self._rpc_urls[(self._next_idx + offset) % n]
+            try:
+                r = await self._http.post(url, json=payload)
+                if r.status_code in (429, 503):
+                    last_exc = httpx.HTTPStatusError(
+                        f"rate-limited at {url}", request=r.request, response=r,
+                    )
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                if "error" in data:
+                    raise RuntimeError(f"{url} returned RPC error: {data['error']}")
+                # Rotate so the next call starts from the next URL.
+                self._next_idx = (self._next_idx + offset + 1) % n
+                return data.get("result")
+            except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return None
+
+    async def get_block_number(self) -> int:
+        result = await self._rpc("eth_blockNumber", [])
+        return int(result, 16) if result else 0
+
+    async def get_transfer_logs(
+        self,
+        token_address: str,
+        from_block: int,
+        to_block: int,
+        from_topic_filter: list[str] | None = None,
+        to_topic_filter: list[str] | None = None,
+    ) -> list[dict]:
+        """Fetch ERC-20 Transfer events for a token in a block range, optionally
+        filtered by `from` (topic[1]) or `to` (topic[2]) address sets.
+        """
+        topics: list = [_TRANSFER_TOPIC]
+        topics.append(from_topic_filter if from_topic_filter is not None else None)
+        topics.append(to_topic_filter if to_topic_filter is not None else None)
+        params = [{
+            "address": token_address,
+            "fromBlock": hex(from_block),
+            "toBlock": hex(to_block),
+            "topics": topics,
+        }]
+        result = await self._rpc("eth_getLogs", params)
+        return result if isinstance(result, list) else []
+
+
+def parse_transfer_log(log: dict, decimals: int) -> tuple[str, str, float]:
+    """Decode a Transfer log into (from_addr, to_addr, amount_in_token_units)."""
+    topics = log.get("topics") or []
+    if len(topics) < 3:
+        return ("", "", 0.0)
+    from_addr = "0x" + topics[1][-40:].lower()
+    to_addr = "0x" + topics[2][-40:].lower()
+    data = log.get("data", "0x0") or "0x0"
+    try:
+        raw = int(data, 16)
+    except (ValueError, TypeError):
+        raw = 0
+    amount = raw / (10 ** decimals) if decimals >= 0 else raw
+    return (from_addr, to_addr, amount)
+
+
+async def compute_token_netflow(
+    client: EthOnchainClient,
+    token: TokenInfo,
+    exchange_wallets: dict[str, list[str]],
+    blocks_back: int,
+    price_usd: Optional[float],
+) -> Optional[dict]:
+    """Compute one token's 24h exchange netflow. Returns None if price missing or RPC fails."""
+    if price_usd is None or price_usd <= 0:
+        return None
+
+    # Build padded-address sets for topic filtering + reverse map for attribution.
+    padded_all: list[str] = []
+    wallet_to_exchange: dict[str, str] = {}
+    for exchange, wallets in exchange_wallets.items():
+        for w in wallets:
+            wal = w.lower()
+            padded_all.append(_pad_address(wal))
+            wallet_to_exchange[wal] = exchange
+
+    if not padded_all:
+        return None
+
+    try:
+        latest = await client.get_block_number()
+        from_block = max(0, latest - blocks_back)
+        # Sequential (not parallel) to be gentle on free RPCs. Fail fast: if either
+        # leg errors after exhausting all RPC fallbacks, return None — partial data
+        # (e.g. only deposits, no withdrawals) misleads the user.
+        deposits_logs = await client.get_transfer_logs(
+            token.address, from_block, latest,
+            to_topic_filter=padded_all,
+        )
+        await asyncio.sleep(0.3)
+        withdrawals_logs = await client.get_transfer_logs(
+            token.address, from_block, latest,
+            from_topic_filter=padded_all,
+        )
+    except Exception as e:
+        _log.warning("Onchain netflow RPC error for %s: %s", token.symbol, e)
+        return None
+
+    total_deposits = 0.0
+    total_withdrawals = 0.0
+    deposit_count = 0
+    withdrawal_count = 0
+    by_exchange: dict[str, dict[str, float]] = {}
+
+    for entry in deposits_logs:
+        from_addr, to_addr, amount = parse_transfer_log(entry, token.decimals)
+        exchange = wallet_to_exchange.get(to_addr)
+        if not exchange:
+            continue
+        # If the SENDER is also an exchange wallet, this is exchange-to-exchange shuffling
+        # — net out by classifying as withdrawal (handled in withdrawals loop) and skip here.
+        if from_addr in wallet_to_exchange:
+            continue
+        usd = amount * price_usd
+        by_exchange.setdefault(exchange, {"deposits_usd": 0.0, "withdrawals_usd": 0.0})
+        by_exchange[exchange]["deposits_usd"] += usd
+        total_deposits += usd
+        deposit_count += 1
+
+    for entry in withdrawals_logs:
+        from_addr, to_addr, amount = parse_transfer_log(entry, token.decimals)
+        exchange = wallet_to_exchange.get(from_addr)
+        if not exchange:
+            continue
+        if to_addr in wallet_to_exchange:
+            continue
+        usd = amount * price_usd
+        by_exchange.setdefault(exchange, {"deposits_usd": 0.0, "withdrawals_usd": 0.0})
+        by_exchange[exchange]["withdrawals_usd"] += usd
+        total_withdrawals += usd
+        withdrawal_count += 1
+
+    return {
+        "token": token.symbol,
+        "deposits_usd": total_deposits,
+        "withdrawals_usd": total_withdrawals,
+        "net_usd": total_withdrawals - total_deposits,
+        "deposit_count": deposit_count,
+        "withdrawal_count": withdrawal_count,
+        "by_exchange": by_exchange,
+    }
+
+
+def classify_netflow_signal(net_usd: float, total_usd: float) -> tuple[str, str]:
+    """(emoji, short label) based on net flow vs absolute volume.
+
+    Heuristic:
+      - |net| < $250K               → 🟡 Neutral (noise)
+      - net > 0 (withdrawals win)   → 🟢 Accumulation off-exchange (bullish)
+      - net < 0 (deposits win)      → 🔴 Distribution to exchange (bearish)
+      - |net|/|total| > 0.5         → ★ strong-conviction modifier (bigger label)
+    """
+    if abs(net_usd) < 250_000:
+        return ("🟡", "Neutral")
+    strong = total_usd > 0 and (abs(net_usd) / total_usd) > 0.5
+    if net_usd > 0:
+        return ("🟢", "Strong accumulation" if strong else "Accumulation")
+    return ("🔴", "Heavy distribution" if strong else "Distribution")
+
+
+def filter_tokens_traded_on_exchanges(
+    contracts_by_chain: dict[str, TokenInfo],
+    binance_base_assets: Iterable[str],
+    mexc_base_assets: Iterable[str],
+) -> list[TokenInfo]:
+    """Keep only tokens that are listed on Binance OR MEXC futures."""
+    tradeable = {b.upper() for b in binance_base_assets} | {b.upper() for b in mexc_base_assets}
+    return [t for sym, t in contracts_by_chain.items() if sym in tradeable]

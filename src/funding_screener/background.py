@@ -26,6 +26,15 @@ from .exchanges.mexc import MexcClient
 from .macro import DefiLlamaClient
 from .market_data import CoinPaprikaClient
 from .models import ContractInfo, EnrichmentData, FundingRow, Kline
+from .onchain import (
+    EthOnchainClient,
+    classify_netflow_signal,
+    compute_token_netflow,
+    filter_tokens_traded_on_exchanges,
+    load_eth_token_contracts,
+    load_exchange_wallets,
+    _BLOCKS_PER_24H,
+)
 from .signals import compute_funding_streak
 
 log = logging.getLogger(__name__)
@@ -49,11 +58,13 @@ class DataStore:
         self.market_caps_usd: dict[str, float] = {}  # base_asset upper → USD mcap
         self.enrichments: dict[tuple[str, str], EnrichmentData] = {}  # (exchange, symbol) → enrichment
         self.stablecoin_supply: dict[str, dict[str, float]] = {}  # macro: USDT/USDC/TOTAL supply
+        self.onchain_flows: list[dict] = []  # Per-token 24h exchange netflow
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
         self.last_enrichment_at: Optional[datetime] = None
         self.last_macro_at: Optional[datetime] = None
+        self.last_onchain_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self.bg_started_at: Optional[datetime] = None
 
@@ -108,6 +119,15 @@ class DataStore:
     def read_stablecoin_supply(self) -> dict[str, dict[str, float]]:
         with self._lock:
             return {k: dict(v) for k, v in self.stablecoin_supply.items()}
+
+    def update_onchain_flows(self, flows: list[dict]) -> None:
+        with self._lock:
+            self.onchain_flows = flows
+            self.last_onchain_at = datetime.now(timezone.utc)
+
+    def read_onchain_flows(self) -> tuple[list[dict], Optional[datetime]]:
+        with self._lock:
+            return list(self.onchain_flows), self.last_onchain_at
 
     def update_enrichments(self, items: list[EnrichmentData]) -> None:
         with self._lock:
@@ -288,6 +308,92 @@ async def _macro_loop(store: DataStore, llama: DefiLlamaClient) -> None:
         except Exception as e:
             log.exception("macro loop error")
             store.record_error(f"macro: {type(e).__name__}: {e}")
+        await asyncio.sleep(interval)
+
+
+async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
+    """ETH on-chain exchange-flow scanner — every 15 minutes.
+
+    Filters our token universe down to tokens that are (a) listed in
+    `config/eth_token_contracts.yaml`, AND (b) have a Binance or MEXC futures
+    contract. For each one, fetches 24h Transfer events to/from labeled
+    exchange wallets and computes USD-denominated netflow.
+    """
+    interval = 900
+    exchange_wallets = load_exchange_wallets()
+    contracts_by_symbol = load_eth_token_contracts()
+    if not exchange_wallets or not contracts_by_symbol:
+        log.warning("Onchain loop disabled — wallet or token YAML is empty")
+        return
+
+    # Wait for the fast loop to populate funding/contracts (we need price + universe).
+    while True:
+        bnb = store.read_binance()
+        mxc = store.read_mexc()
+        if bnb.contracts or mxc.contracts:
+            break
+        await asyncio.sleep(2)
+
+    while True:
+        try:
+            bnb = store.read_binance()
+            mxc = store.read_mexc()
+            bnb_bases = {c.base_asset.upper() for c in bnb.contracts}
+            mxc_bases = {c.base_asset.upper() for c in mxc.contracts}
+            tradable_tokens = filter_tokens_traded_on_exchanges(
+                contracts_by_symbol, bnb_bases, mxc_bases,
+            )
+
+            # Build symbol → mark price (USD) lookup. Prefer Binance USDT perp,
+            # fall back to MEXC USDT perp, then to Binance USDC.
+            price_map: dict[str, float] = {}
+            for r in bnb.funding:
+                if r.quote_asset == "USDT" and r.mark_price:
+                    price_map.setdefault(r.base_asset.upper(), r.mark_price)
+            for r in mxc.funding:
+                if r.quote_asset == "USDT" and r.mark_price:
+                    price_map.setdefault(r.base_asset.upper(), r.mark_price)
+            for r in bnb.funding:
+                if r.quote_asset == "USDC" and r.mark_price:
+                    price_map.setdefault(r.base_asset.upper(), r.mark_price)
+
+            # MEXC contracts don't carry mark_price in our funding rows; if a
+            # token only trades on MEXC, fall back to its 24h ticker via the
+            # market-cap cache (price implied by mcap/supply isn't available
+            # here, so we just skip — user gets fewer rows but no wrong USD).
+
+            # Strictly sequential — each token does 2 RPC calls inside, parallelising
+            # at this layer too would burn through the public RPC rate limits.
+            results: list = []
+            for token in tradable_tokens:
+                try:
+                    res = await compute_token_netflow(
+                        eth_client,
+                        token,
+                        exchange_wallets,
+                        blocks_back=_BLOCKS_PER_24H,
+                        price_usd=price_map.get(token.symbol),
+                    )
+                    results.append(res)
+                except Exception as e:
+                    log.warning("Onchain compute failed for %s: %s", token.symbol, e)
+                # Pace token-to-token to be RPC-friendly.
+                await asyncio.sleep(0.5)
+            flows: list[dict] = []
+            for r in results:
+                if isinstance(r, dict) and r:
+                    emoji, short = classify_netflow_signal(
+                        r["net_usd"],
+                        r["deposits_usd"] + r["withdrawals_usd"],
+                    )
+                    r["signal_emoji"] = emoji
+                    r["signal_short"] = short
+                    flows.append(r)
+            flows.sort(key=lambda r: r["net_usd"], reverse=True)
+            store.update_onchain_flows(flows)
+        except Exception as e:
+            log.exception("onchain loop error")
+            store.record_error(f"onchain: {type(e).__name__}: {e}")
         await asyncio.sleep(interval)
 
 
@@ -486,6 +592,7 @@ def _runner() -> None:
     mexc = MexcClient()
     mcap_client = CoinPaprikaClient()
     llama = DefiLlamaClient()
+    eth_chain = EthOnchainClient()
     _runner_state["binance"] = binance
     _runner_state["mexc"] = mexc
     try:
@@ -495,13 +602,14 @@ def _runner() -> None:
         loop.create_task(_market_caps_loop(_store, mcap_client))
         loop.create_task(_enrichment_loop(_store, binance, mexc))
         loop.create_task(_macro_loop(_store, llama))
+        loop.create_task(_onchain_loop(_store, eth_chain))
         loop.run_forever()
     finally:
         try:
             loop.run_until_complete(
                 asyncio.gather(
                     binance.aclose(), mexc.aclose(),
-                    mcap_client.aclose(), llama.aclose(),
+                    mcap_client.aclose(), llama.aclose(), eth_chain.aclose(),
                     return_exceptions=True,
                 )
             )

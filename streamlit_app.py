@@ -76,7 +76,7 @@ st.markdown(
 | 3 | Binance price rise | Pairs whose close-to-close return over 1d / 7d / 30d exceeds the threshold (default 1000%). |
 | 4 | MEXC price rise | Same as #3 for MEXC. |
 | 5 | Symbol detail | Click any symbol on other pages → full per-contract view (funding history, OI, L/S ratio, kline chart, signal). |
-| 6 | Whale flows | Exchange netflow + smart-money buys via Arkham (requires `ARKHAM_API_KEY`). |
+| 6 | Exchange flows | 24h on-chain netflow per token (our own ETH-RPC implementation, no API keys). |
 
 All data refreshes automatically via the background updater. The sidebar shows
 the age of each data type and the maker-fee values in use.
