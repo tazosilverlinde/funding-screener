@@ -84,6 +84,28 @@ def load_exchange_wallets() -> dict[str, list[str]]:
     return out
 
 
+def load_non_whale_addresses() -> set[str]:
+    """Load `config/non_whale_addresses.yaml` and flatten every category into
+    one lowercase set. Used by the whale-flow tracker to filter out routine
+    DEX-router / bridge / protocol traffic that would otherwise look like
+    whale activity by size.
+    """
+    path = _config_dir() / "non_whale_addresses.yaml"
+    if not path.exists():
+        return set()
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    eth = (data.get("ethereum") or {})
+    out: set[str] = set()
+    for _category, addrs in eth.items():
+        if not isinstance(addrs, list):
+            continue
+        for a in addrs:
+            if isinstance(a, str):
+                out.add(a.lower().strip())
+    return out
+
+
 def load_eth_token_contracts() -> dict[str, TokenInfo]:
     """Returns {SYMBOL_UPPER: TokenInfo} from config/eth_token_contracts.yaml."""
     path = _config_dir() / "eth_token_contracts.yaml"
@@ -208,8 +230,22 @@ async def compute_token_netflow(
     exchange_wallets: dict[str, list[str]],
     blocks_back: int,
     price_usd: Optional[float],
+    non_whale_addresses: Optional[set[str]] = None,
+    whale_threshold_usd: float = 500_000.0,
 ) -> Optional[dict]:
-    """Compute one token's 24h exchange netflow. Returns None if price missing or RPC fails."""
+    """Compute one token's 24h exchange netflow + whale-class aggregation.
+
+    The result includes both the all-transfer aggregate (existing) and a
+    parallel whale-only aggregate that:
+      - Counts only transfers with USD value >= `whale_threshold_usd`
+      - Excludes counterparties in `non_whale_addresses` (DEX routers, bridges,
+        protocol contracts, known market makers)
+
+    Whale aggregate keys: whale_deposits_usd, whale_withdrawals_usd, whale_net_usd,
+    whale_unique_count (distinct non-excluded addresses involved).
+
+    Returns None if price missing or RPC fails.
+    """
     if price_usd is None or price_usd <= 0:
         return None
 
@@ -250,13 +286,20 @@ async def compute_token_netflow(
     withdrawal_count = 0
     by_exchange: dict[str, dict[str, float]] = {}
 
+    # Whale-class parallel aggregate.
+    excluded_for_whale = set(wallet_to_exchange.keys())
+    if non_whale_addresses:
+        excluded_for_whale |= non_whale_addresses
+    whale_deposits_usd = 0.0
+    whale_withdrawals_usd = 0.0
+    whale_addresses: set[str] = set()
+
     for entry in deposits_logs:
         from_addr, to_addr, amount = parse_transfer_log(entry, token.decimals)
         exchange = wallet_to_exchange.get(to_addr)
         if not exchange:
             continue
-        # If the SENDER is also an exchange wallet, this is exchange-to-exchange shuffling
-        # — net out by classifying as withdrawal (handled in withdrawals loop) and skip here.
+        # exchange-to-exchange shuffle — skip
         if from_addr in wallet_to_exchange:
             continue
         usd = amount * price_usd
@@ -264,6 +307,10 @@ async def compute_token_netflow(
         by_exchange[exchange]["deposits_usd"] += usd
         total_deposits += usd
         deposit_count += 1
+        # Whale class: deposits where the SENDER is a meaningful entity.
+        if usd >= whale_threshold_usd and from_addr not in excluded_for_whale:
+            whale_deposits_usd += usd
+            whale_addresses.add(from_addr)
 
     for entry in withdrawals_logs:
         from_addr, to_addr, amount = parse_transfer_log(entry, token.decimals)
@@ -277,6 +324,10 @@ async def compute_token_netflow(
         by_exchange[exchange]["withdrawals_usd"] += usd
         total_withdrawals += usd
         withdrawal_count += 1
+        # Whale class: withdrawals where the RECIPIENT is a meaningful entity.
+        if usd >= whale_threshold_usd and to_addr not in excluded_for_whale:
+            whale_withdrawals_usd += usd
+            whale_addresses.add(to_addr)
 
     return {
         "token": token.symbol,
@@ -286,6 +337,10 @@ async def compute_token_netflow(
         "deposit_count": deposit_count,
         "withdrawal_count": withdrawal_count,
         "by_exchange": by_exchange,
+        "whale_deposits_usd": whale_deposits_usd,
+        "whale_withdrawals_usd": whale_withdrawals_usd,
+        "whale_net_usd": whale_withdrawals_usd - whale_deposits_usd,
+        "whale_unique_count": len(whale_addresses),
     }
 
 

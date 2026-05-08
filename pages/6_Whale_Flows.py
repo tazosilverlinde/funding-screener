@@ -163,6 +163,89 @@ with st.expander("Per-exchange breakdown", expanded=False):
 
 st.divider()
 
+# ---------------- whale flows (large-transfer subset) ----------------
+
+st.divider()
+st.subheader("Whale flows — large transfers (>$500K), 24h")
+st.caption(
+    "Subset of the table above: only transfers ≥ $500K **between an exchange and a "
+    "non-excluded wallet**. We strip out DEX routers, bridges, protocol contracts, "
+    "and known market makers (see `config/non_whale_addresses.yaml`) so what's left "
+    "is genuine whale-vs-exchange activity. **Auto-discovered** — no manual list of "
+    "specific whales is required; any wallet that moved > $500K to/from an exchange "
+    "in 24h gets counted."
+)
+
+# Pull whale subset from the same flows we already loaded above.
+whale_rows = []
+for r in flows:
+    wn = r.get("whale_net_usd", 0.0) or 0.0
+    wd = r.get("whale_deposits_usd", 0.0) or 0.0
+    ww = r.get("whale_withdrawals_usd", 0.0) or 0.0
+    wcount = r.get("whale_unique_count", 0) or 0
+    if wcount == 0 and wd == 0 and ww == 0:
+        continue  # nothing whale-class for this token
+    # Signal classification — same heuristic as the broader netflow.
+    emoji, short = ("🟢", "Whale accumulation") if wn > 0 else (
+        ("🔴", "Whale distribution") if wn < 0 else ("🟡", "Mixed")
+    )
+    whale_rows.append({
+        "Signal": f"{emoji} {short}",
+        "Token": r["token"],
+        "Whale net (USD)": wn,
+        "Whale withdrawals (USD)": ww,
+        "Whale deposits (USD)": wd,
+        "Unique whales": wcount,
+    })
+
+if not whale_rows:
+    st.info(
+        "No transfers above the $500K threshold in the last 24h for tracked tokens — "
+        "either market is calm, or wait for the next 15-min on-chain cycle. "
+        "Lower the threshold in `compute_token_netflow` (background.py) to be more sensitive."
+    )
+else:
+    whale_df = pd.DataFrame(whale_rows).sort_values("Whale net (USD)", ascending=False)
+    st.dataframe(
+        whale_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Signal": st.column_config.TextColumn(
+                "Signal",
+                help=(
+                    "🟢 Whale accumulation — large withdrawals exceed large deposits, "
+                    "i.e. whales are moving coins OFF exchanges (often bullish setup).\n"
+                    "🔴 Whale distribution — large deposits exceed large withdrawals "
+                    "(often bearish, pre-sale positioning).\n"
+                    "🟡 Mixed — roughly balanced large activity."
+                ),
+            ),
+            "Whale net (USD)": st.column_config.NumberColumn(
+                format="$%+,.0f",
+                help="Whale withdrawals − whale deposits, USD. Positive = bullish bias.",
+            ),
+            "Whale withdrawals (USD)": st.column_config.NumberColumn(
+                format="$%,.0f",
+                help="Sum of single transfers ≥ $500K from an exchange to a non-excluded address in 24h.",
+            ),
+            "Whale deposits (USD)": st.column_config.NumberColumn(
+                format="$%,.0f",
+                help="Sum of single transfers ≥ $500K from a non-excluded address to an exchange in 24h.",
+            ),
+            "Unique whales": st.column_config.NumberColumn(
+                format="%d",
+                help="Distinct non-excluded counterparty addresses that participated. "
+                     "More whales = stronger signal; 1-whale rows can be one wallet's idiosyncratic move.",
+            ),
+        },
+    )
+    n_distinct_whales = sum(r["Unique whales"] for r in whale_rows)
+    st.caption(
+        f"{len(whale_df)} tokens with whale activity in 24h, "
+        f"{n_distinct_whales} distinct whale addresses involved across all tokens."
+    )
+
 # ---------------- 7-day daily flows for stables + BTC + ETH ----------------
 
 st.divider()
@@ -247,6 +330,10 @@ st.markdown(
 - **Wallet coverage** — `config/exchange_wallets.yaml` has the major Binance/MEXC/OKX/
   Bybit/Coinbase/Kraken hot wallets, but not every wallet of every exchange. Adding a
   missing wallet just makes the netflow more accurate.
+- **Whale auto-discovery** — every wallet that moves > $500K to/from an exchange counts
+  as a whale; we don't need a curated list. The exclusion list in
+  `config/non_whale_addresses.yaml` filters out routine plumbing (DEX routers, bridges,
+  market makers). Adding to that file just removes more noise; it never hides real whales.
 - **Internal exchange shuffling** — when an exchange moves between its own wallets, both
   endpoints are in our list and we cancel the flow out. So Binance-to-Binance moves
   correctly net to zero.

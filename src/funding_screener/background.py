@@ -44,6 +44,7 @@ from .onchain import (
     filter_tokens_traded_on_exchanges,
     load_eth_token_contracts,
     load_exchange_wallets,
+    load_non_whale_addresses,
     _BLOCKS_PER_24H,
 )
 from .screener.combined_high_funding import screen_combined_high_funding
@@ -505,6 +506,7 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
     interval = 900
     exchange_wallets = load_exchange_wallets()
     contracts_by_symbol = load_eth_token_contracts()
+    non_whale_addresses = load_non_whale_addresses()
     if not exchange_wallets or not contracts_by_symbol:
         log.warning("Onchain loop disabled — wallet or token YAML is empty")
         return
@@ -556,6 +558,8 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
                         exchange_wallets,
                         blocks_back=_BLOCKS_PER_24H,
                         price_usd=price_map.get(token.symbol),
+                        non_whale_addresses=non_whale_addresses,
+                        whale_threshold_usd=500_000.0,
                     )
                     results.append(res)
                 except Exception as e:
