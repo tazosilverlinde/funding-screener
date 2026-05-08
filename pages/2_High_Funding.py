@@ -25,6 +25,7 @@ from funding_screener.screener import screen_combined_high_funding  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    cooldown_banner,
     filter_dataframe_to_watchlist,
     freshness_banner,
     minutes_to,
@@ -61,6 +62,7 @@ st.caption(
 )
 
 freshness_banner(store)
+cooldown_banner(store)
 st.divider()
 
 binance = store.read_binance()
@@ -390,7 +392,7 @@ if not df.empty:
         ),
     }
     df = filter_dataframe_to_watchlist(df, watchlist, ["Binance symbol", "MEXC symbol"])
-    render_table(df, column_config=col_cfg)
+    render_table(df, column_config=col_cfg, download_basename="high_funding_combined")
     cap_msg = (f"watchlist of {len(watchlist)} symbols" if watchlist
                else f"top {len(df)} of {len(rows)} flagged pairs")
     st.caption(f"Showing {len(df)} rows ({cap_msg}), sorted by max |8h-normalized rate|.")

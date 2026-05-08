@@ -36,15 +36,18 @@ from funding_screener.signals import classify_signal, compute_composite_score  #
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    cooldown_banner,
     minutes_to,
     run_async,
     sidebar_status,
+    symbol_search_sidebar,
 )
 
 st.set_page_config(page_title="Symbol Detail", layout="wide")
 
 store = boot()
 sidebar_status(store)
+symbol_search_sidebar(store)
 auto_rerun(interval_ms=60_000, key="detail_tick")
 
 
@@ -187,6 +190,7 @@ composite = compute_composite_score(
 # ---------------- HEADER ----------------
 
 st.title(f"{symbol_q} — {exchange}")
+cooldown_banner(store)
 st.caption(f"Base asset: **{base_asset}** • Quote: **{(contract.quote_asset if contract else 'USDT')}**")
 
 m1, m2, m3, m4 = st.columns(4)

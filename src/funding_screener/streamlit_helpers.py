@@ -291,7 +291,19 @@ def to_df(rows: list[dict], column_order: list[str] | None = None) -> pd.DataFra
     return df
 
 
-def render_table(df: pd.DataFrame, column_config: Optional[dict] = None, height: int | None = None) -> None:
+def render_table(
+    df: pd.DataFrame,
+    column_config: Optional[dict] = None,
+    height: int | None = None,
+    download_basename: Optional[str] = None,
+) -> None:
+    """Render a dataframe with optional CSV export button.
+
+    `download_basename` (e.g. "high_funding") activates a "📥 Download CSV"
+    button below the table. The exported CSV contains the *displayed* rows
+    (after any filtering the page already applied), with columns in the same
+    order Streamlit shows them.
+    """
     if df.empty:
         st.info("No rows match the filter at the moment.")
         return
@@ -301,6 +313,40 @@ def render_table(df: pd.DataFrame, column_config: Optional[dict] = None, height:
     if height is not None:
         kwargs["height"] = height
     st.dataframe(df, **kwargs)
+    if download_basename:
+        from datetime import datetime as _dt, timezone as _tz
+        ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+        st.download_button(
+            label="📥 Download CSV",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{download_basename}_{ts}.csv",
+            mime="text/csv",
+            help="Exports the rows currently shown above. Filename is timestamped (UTC).",
+        )
+
+
+def cooldown_banner(store: DataStore) -> None:
+    """If any exchange is in cooldown (post-rate-limit / 451 geo-block), show a
+    prominent in-page banner. Pages call this near their freshness banner.
+    """
+    try:
+        from .background import _runner_clients  # type: ignore[attr-defined]
+        bnb_client, mxc_client = _runner_clients()
+    except Exception:
+        return
+    msgs: list[str] = []
+    if bnb_client and bnb_client.is_cooled_down():
+        mins = bnb_client.cooldown_remaining_seconds() // 60
+        msgs.append(f"**Binance** rate-limit cooldown: {mins}m remaining")
+    if mxc_client and mxc_client.is_cooled_down():
+        mins = mxc_client.cooldown_remaining_seconds() // 60
+        msgs.append(f"**MEXC** rate-limit cooldown: {mins}m remaining")
+    if msgs:
+        st.warning(
+            "⏱ " + " · ".join(msgs)
+            + " — that exchange's data is frozen at the last successful fetch. "
+            "Background loops will resume automatically when the cooldown lifts."
+        )
 
 
 def _age(ts: datetime | None) -> str:

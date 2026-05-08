@@ -16,10 +16,12 @@ from funding_screener.screener import screen_price_rise  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    cooldown_banner,
     filter_dataframe_to_watchlist,
     freshness_banner,
     render_table,
     sidebar_status,
+    symbol_search_sidebar,
     to_df,
     watchlist_sidebar,
 )
@@ -28,6 +30,7 @@ st.set_page_config(page_title="Binance Price Rise", layout="wide")
 
 store = boot()
 sidebar_status(store)
+symbol_search_sidebar(store)
 watchlist = watchlist_sidebar()
 auto_rerun(interval_ms=60_000, key="page3_tick")
 
@@ -44,6 +47,7 @@ st.caption(
 )
 
 freshness_banner(store)
+cooldown_banner(store)
 
 if not is_binance_enabled():
     st.error(
@@ -153,7 +157,7 @@ if not df.empty:
         ),
     }
     df = filter_dataframe_to_watchlist(df, watchlist, ["Symbol"])
-    render_table(df, column_config=col_cfg)
+    render_table(df, column_config=col_cfg, download_basename="binance_price_rise")
     cap_msg = (f"watchlist of {len(watchlist)} symbols" if watchlist
                else f"top {len(df)} of {len(rows)} flagged pairs")
     st.caption(f"Showing {len(df)} ({cap_msg}).")

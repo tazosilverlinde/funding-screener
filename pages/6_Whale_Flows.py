@@ -30,14 +30,17 @@ if str(_SRC) not in sys.path:
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    cooldown_banner,
     minutes_to,
     sidebar_status,
+    symbol_search_sidebar,
 )
 
 st.set_page_config(page_title="Exchange Flows (on-chain)", layout="wide")
 
 store = boot()
 sidebar_status(store)
+symbol_search_sidebar(store)
 auto_rerun(interval_ms=60_000, key="page6_tick")
 
 st.title("Exchange flows — 24h on-chain netflow per token")
@@ -48,6 +51,7 @@ st.caption(
     "real, see the bottom of the page."
 )
 
+cooldown_banner(store)
 flows, fetched_at = store.read_onchain_flows()
 
 # Freshness pill

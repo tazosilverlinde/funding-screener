@@ -21,7 +21,9 @@ if str(_SRC) not in sys.path:
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
+    cooldown_banner,
     sidebar_status,
+    symbol_search_sidebar,
 )
 from funding_screener.unlocks import (  # noqa: E402
     attach_usd_values,
@@ -32,6 +34,7 @@ st.set_page_config(page_title="Token Unlocks", layout="wide")
 
 store = boot()
 sidebar_status(store)
+symbol_search_sidebar(store)
 auto_rerun(interval_ms=300_000, key="page7_tick")
 
 st.title("Token unlock calendar")
