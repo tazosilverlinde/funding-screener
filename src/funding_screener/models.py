@@ -162,5 +162,11 @@ class PriceRiseRow(_Frozen):
     volume_today_millions: Optional[float]           # newest daily kline's quote_volume / 1e6
     volume_yesterday_millions: Optional[float]
     volume_day_before_millions: Optional[float]
-    max_pct: float                                   # internal sort key — not displayed
-    max_window_days: int                             # internal — not displayed
+    # Composite signal score reused from Page 2's logic. Lets you tell apart a
+    # bullish, momentum-confirmed pump from a fragile squeeze that's about to
+    # reverse — both look the same in pct_1d alone.
+    composite_score: Optional[int] = None
+    composite_emoji: Optional[str] = None
+    composite_short: Optional[str] = None
+    max_pct: float = 0.0                             # internal sort key — not displayed
+    max_window_days: int = 1                         # internal — not displayed

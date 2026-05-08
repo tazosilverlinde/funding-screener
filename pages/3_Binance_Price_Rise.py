@@ -60,6 +60,9 @@ st.divider()
 
 snap = store.read_binance()
 mcaps = store.read_market_caps()
+enrichments = store.read_enrichments()
+onchain_flows, _ = store.read_onchain_flows()
+onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
 rows = screen_price_rise(
     snap.contracts,
     snap.klines,
@@ -69,12 +72,17 @@ rows = screen_price_rise(
     threshold_percent=threshold,
     windows_days=windows,
     min_24h_quote_volume=min_volume,
+    enrichments_by_key=enrichments,
+    onchain_netflow_by_base=onchain_by_base,
 )
 
 cap = int(settings()["row_limit"])
 df = to_df(
     [r.model_dump() for r in rows[:cap]],
     column_order=[
+        "composite_score",
+        "composite_emoji",
+        "composite_short",
         "symbol",
         "current_price",
         "ath_price",
@@ -90,10 +98,20 @@ df = to_df(
 )
 
 if not df.empty:
+    # Pre-format the composite columns: numeric "Score" + textual "Score label".
+    df["Score"] = df["composite_score"]
+    df["Score label"] = (
+        df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
+    )
+    df = df.drop(columns=["composite_score", "composite_emoji", "composite_short"])
     # Make symbol clickable → detail page.
     df["symbol"] = df["symbol"].apply(
         lambda s: f"/Symbol_Detail?exchange=Binance&symbol={s}" if s else ""
     )
+    # Move Score columns to the front; everything else preserves order.
+    front = ["Score", "Score label"]
+    cols = front + [c for c in df.columns if c not in front]
+    df = df[cols]
     df = df.rename(
         columns={
             "symbol": "Symbol",
@@ -110,6 +128,23 @@ if not df.empty:
         }
     )
     col_cfg = {
+        "Score": st.column_config.NumberColumn(
+            "Score",
+            format="%+d",
+            help=(
+                "Composite signal score, signed [-100..+100]. **Positive = long bias**, "
+                "negative = short bias.\n\n"
+                "On a price-rise page this answers: is this big % move backed by structural "
+                "buy pressure (bullish funding + accumulation), or just a fragile squeeze "
+                "that's about to reverse? Score > +30 with a 500%+ rise = real momentum; "
+                "score < -10 with a 500%+ rise = leveraged longs piling in late, often a top.\n\n"
+                "Same function as Page 2 — see that page's tooltip for the full ruleset."
+            ),
+        ),
+        "Score label": st.column_config.TextColumn(
+            "Score label",
+            help="Human-readable bucket of the composite score.",
+        ),
         "Symbol": st.column_config.LinkColumn(
             "Symbol",
             display_text=r"symbol=([A-Z0-9_]+)",

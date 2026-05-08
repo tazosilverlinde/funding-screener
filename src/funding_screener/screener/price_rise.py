@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from ..models import ContractInfo, FundingRow, Kline, PriceRiseRow
+from ..models import ContractInfo, EnrichmentData, FundingRow, Kline, PriceRiseRow
+from ..signals import compute_composite_score
 
 
 def screen_price_rise(
@@ -30,8 +31,12 @@ def screen_price_rise(
     threshold_percent: float,
     windows_days: list[int],
     min_24h_quote_volume: float,
+    enrichments_by_key: Optional[dict[tuple[str, str], EnrichmentData]] = None,
+    onchain_netflow_by_base: Optional[dict[str, float]] = None,
 ) -> list[PriceRiseRow]:
     funding_by_symbol = {r.symbol: r for r in funding_rows}
+    enrichments_by_key = enrichments_by_key or {}
+    onchain_netflow_by_base = onchain_netflow_by_base or {}
     out: list[PriceRiseRow] = []
     for c in contracts:
         if c.status != "TRADING":
@@ -43,7 +48,13 @@ def screen_price_rise(
         if not klines:
             continue
         mcap_usd = market_caps_usd.get(c.base_asset.upper())
-        row = _row_from_klines(c, klines, windows_days, v, funding_by_symbol.get(c.symbol), mcap_usd)
+        row = _row_from_klines(
+            c, klines, windows_days, v,
+            funding_by_symbol.get(c.symbol),
+            mcap_usd,
+            enrichments_by_key.get((c.exchange, c.symbol)),
+            onchain_netflow_by_base.get(c.base_asset.upper()),
+        )
         if row is not None and row.max_pct > threshold_percent:
             out.append(row)
     out.sort(key=lambda r: r.max_pct, reverse=True)
@@ -57,6 +68,8 @@ def _row_from_klines(
     quote_volume_24h: float | None,
     funding: FundingRow | None,
     market_cap_usd: float | None,
+    enrichment: Optional[EnrichmentData] = None,
+    onchain_net_usd: Optional[float] = None,
 ) -> PriceRiseRow | None:
     if not klines:
         return None
@@ -80,6 +93,20 @@ def _row_from_klines(
 
     ath = max((k.high for k in klines), default=None)
 
+    # Composite score — same function Page 2 uses. We pass whatever inputs we have:
+    # funding always, enrichment fields when this symbol is in the top-30 enrichment
+    # cohort, on-chain netflow when this token has an ETH contract we track.
+    composite = compute_composite_score(
+        funding_8h_norm_pct=funding.rate_8h_norm_percent if funding else None,
+        streak_count=enrichment.funding_streak_count if enrichment else 0,
+        streak_direction=enrichment.funding_streak_direction if enrichment else None,
+        mark_index_spread_pct=enrichment.mark_index_spread_percent if enrichment else None,
+        oi_change_24h_pct=enrichment.oi_change_24h_pct if enrichment else None,
+        ls_ratio_global=enrichment.ls_ratio_global if enrichment else None,
+        ls_ratio_top=enrichment.ls_ratio_top if enrichment else None,
+        onchain_net_usd=onchain_net_usd,
+    )
+
     return PriceRiseRow(
         exchange=c.exchange,
         symbol=c.symbol,
@@ -96,6 +123,9 @@ def _row_from_klines(
         volume_today_millions=_kline_quote_volume_M(klines, -1),
         volume_yesterday_millions=_kline_quote_volume_M(klines, -2),
         volume_day_before_millions=_kline_quote_volume_M(klines, -3),
+        composite_score=composite.score,
+        composite_emoji=composite.emoji,
+        composite_short=composite.short,
         max_pct=max_pct,
         max_window_days=max_window,
     )

@@ -52,6 +52,9 @@ st.divider()
 
 snap = store.read_mexc()
 mcaps = store.read_market_caps()
+enrichments = store.read_enrichments()
+onchain_flows, _ = store.read_onchain_flows()
+onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
 rows = screen_price_rise(
     snap.contracts,
     snap.klines,
@@ -61,12 +64,17 @@ rows = screen_price_rise(
     threshold_percent=threshold,
     windows_days=windows,
     min_24h_quote_volume=min_volume,
+    enrichments_by_key=enrichments,
+    onchain_netflow_by_base=onchain_by_base,
 )
 
 cap = int(settings()["row_limit"])
 df = to_df(
     [r.model_dump() for r in rows[:cap]],
     column_order=[
+        "composite_score",
+        "composite_emoji",
+        "composite_short",
         "symbol",
         "current_price",
         "ath_price",
@@ -82,9 +90,17 @@ df = to_df(
 )
 
 if not df.empty:
+    df["Score"] = df["composite_score"]
+    df["Score label"] = (
+        df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
+    )
+    df = df.drop(columns=["composite_score", "composite_emoji", "composite_short"])
     df["symbol"] = df["symbol"].apply(
         lambda s: f"/Symbol_Detail?exchange=MEXC&symbol={s}" if s else ""
     )
+    front = ["Score", "Score label"]
+    cols = front + [c for c in df.columns if c not in front]
+    df = df[cols]
     df = df.rename(
         columns={
             "symbol": "Symbol",
@@ -101,6 +117,20 @@ if not df.empty:
         }
     )
     col_cfg = {
+        "Score": st.column_config.NumberColumn(
+            "Score",
+            format="%+d",
+            help=(
+                "Composite signal score, signed [-100..+100]. Positive = long bias.\n\n"
+                "Tells you whether a 500%+ price rise is structurally bullish (funding "
+                "negative, OI rising, off-exchange accumulation) or fragile (funding spiking "
+                "positive = leveraged longs piling in = squeeze risk)."
+            ),
+        ),
+        "Score label": st.column_config.TextColumn(
+            "Score label",
+            help="Human-readable bucket: 🚀 Strong bull / 🟢 Bullish / ↗ Mild bull / 🟡 Neutral / ↘ Mild bear / 🔴 Bearish / 💥 Strong bear",
+        ),
         "Symbol": st.column_config.LinkColumn(
             "Symbol",
             display_text=r"symbol=([A-Z0-9_]+)",
