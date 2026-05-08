@@ -207,7 +207,7 @@ async def _fast_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
             )
             errs = [r for r in results if isinstance(r, Exception)]
             if errs:
-                store.record_error(f"fast-loop partial errors: {errs[0]}")
+                store.record_error(f"fast-loop partial errors: {_describe_errors(errs)}")
             else:
                 store.record_error("")
         except Exception as e:
@@ -392,6 +392,16 @@ async def _refresh_klines(
 
 def _ok(result):
     return None if isinstance(result, Exception) else result
+
+
+def _describe_errors(errs: list) -> str:
+    """Render up to 3 exceptions with type + repr so empty-str exceptions
+    (e.g. bare TimeoutError()) still produce an actionable message."""
+    out = []
+    for e in errs[:3]:
+        s = repr(e) if str(e) else type(e).__name__ + "()"
+        out.append(f"{type(e).__name__}: {s}")
+    return " | ".join(out)
 
 
 def _runner() -> None:
