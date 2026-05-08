@@ -11,7 +11,7 @@ if str(_SRC) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
-from funding_screener.config import settings  # noqa: E402
+from funding_screener.config import is_binance_enabled, settings  # noqa: E402
 from funding_screener.screener import screen_usdt_usdc_arb  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
@@ -37,6 +37,15 @@ st.caption(
 )
 
 freshness_banner(store)
+
+if not is_binance_enabled():
+    st.error(
+        "Binance is disabled in this deployment (env var `BINANCE_ENABLED=false`). "
+        "This page needs Binance funding data, so it can't show anything here. "
+        "The MEXC pages still work — see the sidebar."
+    )
+    st.stop()
+
 st.divider()
 
 snap = store.read_binance()

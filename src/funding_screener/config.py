@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -53,3 +54,21 @@ def binance_taker_fee_for(symbol: str, quote: str) -> float:
     if quote in by_quote:
         return float(by_quote[quote])
     return float(f["futures_taker"])
+
+
+def is_binance_enabled() -> bool:
+    """Skip every Binance HTTP call when this returns False.
+
+    Use case: deploying to a host (e.g. Streamlit Cloud's AWS US IPs) that
+    Binance geo-blocks with HTTP 451. Set BINANCE_ENABLED=false in the host's
+    environment / secrets to run as MEXC-only.
+
+    Default is True (Binance enabled) so local development is unaffected.
+    """
+    raw = os.getenv("BINANCE_ENABLED", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def is_mexc_enabled() -> bool:
+    raw = os.getenv("MEXC_ENABLED", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")

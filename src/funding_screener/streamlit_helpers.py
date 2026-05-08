@@ -15,6 +15,7 @@ import streamlit as st
 
 from .background import DataStore, get_store, start_background, wait_for_initial_data
 from .config import fees as _fees_cfg
+from .config import is_binance_enabled, is_mexc_enabled
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -65,6 +66,10 @@ def sidebar_status(store: DataStore) -> None:
     last_fast, last_slow, _ = store.freshness()
     st.sidebar.write(f"**Funding:** {_age(last_fast)}")
     st.sidebar.write(f"**Klines:** {_age(last_slow)}")
+    if not is_binance_enabled():
+        st.sidebar.warning("Binance disabled (set `BINANCE_ENABLED=true` to re-enable)")
+    if not is_mexc_enabled():
+        st.sidebar.warning("MEXC disabled (set `MEXC_ENABLED=true` to re-enable)")
 
     st.sidebar.divider()
     st.sidebar.header("Maker fees")

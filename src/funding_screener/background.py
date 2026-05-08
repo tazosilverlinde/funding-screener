@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-from .config import settings
+from .config import is_binance_enabled, is_mexc_enabled, settings
 from .exchanges.binance import BinanceClient
 from .exchanges.mexc import MexcClient
 from .market_data import CoinPaprikaClient
@@ -153,26 +153,49 @@ def get_store() -> DataStore:
 
 
 async def _fast_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient) -> None:
-    """Funding rates, contracts, 24h volumes — every 60s."""
+    """Funding rates, contracts, 24h volumes — every 60s.
+
+    Honours BINANCE_ENABLED / MEXC_ENABLED env flags: when an exchange is
+    disabled, its three calls are skipped entirely (no HTTP, no cache update).
+    """
     interval = 60
     while True:
         try:
-            results = await asyncio.gather(
-                binance.fetch_funding_rows(),
-                binance.fetch_contracts(),
-                binance.fetch_24h_quote_volume(),
-                mexc.fetch_funding_rows(),
-                mexc.fetch_contracts(),
-                mexc.fetch_24h_quote_volume(),
-                return_exceptions=True,
-            )
+            bnb_on = is_binance_enabled()
+            mxc_on = is_mexc_enabled()
+            tasks: list = []
+            if bnb_on:
+                tasks += [
+                    binance.fetch_funding_rows(),
+                    binance.fetch_contracts(),
+                    binance.fetch_24h_quote_volume(),
+                ]
+            if mxc_on:
+                tasks += [
+                    mexc.fetch_funding_rows(),
+                    mexc.fetch_contracts(),
+                    mexc.fetch_24h_quote_volume(),
+                ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Walk the results in the order tasks were queued.
+            it = iter(results)
+            bnb_funding = bnb_contracts = bnb_volumes = None
+            mxc_funding = mxc_contracts = mxc_volumes = None
+            if bnb_on:
+                bnb_funding = _ok(next(it))
+                bnb_contracts = _ok(next(it))
+                bnb_volumes = _ok(next(it))
+            if mxc_on:
+                mxc_funding = _ok(next(it))
+                mxc_contracts = _ok(next(it))
+                mxc_volumes = _ok(next(it))
             store.update_fast(
-                binance_funding=_ok(results[0]),
-                binance_contracts=_ok(results[1]),
-                binance_volumes=_ok(results[2]),
-                mexc_funding=_ok(results[3]),
-                mexc_contracts=_ok(results[4]),
-                mexc_volumes=_ok(results[5]),
+                binance_funding=bnb_funding,
+                binance_contracts=bnb_contracts,
+                binance_volumes=bnb_volumes,
+                mexc_funding=mxc_funding,
+                mexc_contracts=mxc_contracts,
+                mexc_volumes=mxc_volumes,
             )
             errs = [r for r in results if isinstance(r, Exception)]
             if errs:
@@ -204,11 +227,13 @@ async def _slow_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
 
     while True:
         try:
-            await asyncio.gather(
-                _refresh_klines(store, "binance", binance, candidate_cap, days_to_fetch, min_vol),
-                _refresh_klines(store, "mexc", mexc, candidate_cap, days_to_fetch, min_vol),
-                return_exceptions=True,
-            )
+            tasks = []
+            if is_binance_enabled():
+                tasks.append(_refresh_klines(store, "binance", binance, candidate_cap, days_to_fetch, min_vol))
+            if is_mexc_enabled():
+                tasks.append(_refresh_klines(store, "mexc", mexc, candidate_cap, days_to_fetch, min_vol))
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as e:
             log.exception("slow loop error")
             store.record_error(f"slow-loop fatal: {type(e).__name__}: {e}")
@@ -248,6 +273,8 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
 
     while True:
         try:
+            bnb_on = is_binance_enabled()
+            mxc_on = is_mexc_enabled()
             bnb_snap = store.read_binance()
             mxc_snap = store.read_mexc()
 
@@ -256,12 +283,12 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
                 bnb_snap.funding,
                 key=lambda r: abs(r.rate_8h_norm_percent),
                 reverse=True,
-            )[:top_n]
+            )[:top_n] if bnb_on else []
             mxc_top = sorted(
                 mxc_snap.funding,
                 key=lambda r: abs(r.rate_8h_norm_percent),
                 reverse=True,
-            )[:top_n]
+            )[:top_n] if mxc_on else []
 
             sem = asyncio.Semaphore(4)
 

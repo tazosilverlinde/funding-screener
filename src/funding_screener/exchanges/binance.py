@@ -59,12 +59,17 @@ class BinanceClient:
         for attempt in range(retries + 1):
             try:
                 r = await self._http.get(url, params=params)
-                # Don't retry on 418/429 — honour Retry-After and propagate.
-                if r.status_code in (418, 429):
-                    retry_after = _parse_retry_after(r.headers.get("Retry-After"))
+                # Don't retry on rate-limit / geo-block — honour Retry-After and propagate.
+                # 451 = Unavailable For Legal Reasons (geo-block); set a 24h cooldown
+                # since geo-blocks don't lift on a short timer.
+                if r.status_code in (418, 429, 451):
+                    if r.status_code == 451:
+                        retry_after = 24 * 60 * 60
+                    else:
+                        retry_after = _parse_retry_after(r.headers.get("Retry-After"))
                     self._cooldown_until = time.monotonic() + retry_after
                     _log.warning(
-                        "Binance %d on %s — backing off for %ds (Retry-After header)",
+                        "Binance %d on %s — backing off for %ds",
                         r.status_code, path, retry_after,
                     )
                     r.raise_for_status()
