@@ -41,6 +41,54 @@ st.caption("Read-only Binance & MEXC perpetual-futures screener. Public APIs onl
 
 freshness_banner(store)
 
+# ---- daily highlights (top of page — newspaper-style digest) ----
+# Aggregates one headline from each major signal source so the user sees
+# what matters at first glance without clicking through pages.
+from funding_screener.highlights import all_highlights  # noqa: E402
+from funding_screener.unlocks import load_upcoming_unlocks  # noqa: E402
+
+_landing_bnb = store.read_binance()
+_landing_mxc = store.read_mexc()
+_landing_enrichments = store.read_enrichments()
+_landing_onchain, _ = store.read_onchain_flows()
+_landing_onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in _landing_onchain}
+_landing_klines: dict = {}
+_landing_klines.update(_landing_bnb.klines)
+_landing_klines.update(_landing_mxc.klines)
+from funding_screener.screener import screen_combined_high_funding as _screen  # noqa: E402
+
+_landing_combined = _screen(
+    _landing_bnb.funding, _landing_mxc.funding,
+    _landing_bnb.contracts, _landing_mxc.contracts,
+    _landing_enrichments,
+    threshold_percent=0.0,
+    binance_volumes=_landing_bnb.volumes, mexc_volumes=_landing_mxc.volumes,
+    min_volume_usd_per_side=0.0,
+    onchain_netflow_by_base=_landing_onchain_by_base,
+    klines_by_symbol=_landing_klines,
+    score_histories=store.read_score_histories(),
+)
+
+_landing_tradable_bases = {c.base_asset.upper() for c in _landing_bnb.contracts} | {c.base_asset.upper() for c in _landing_mxc.contracts}
+_landing_unlocks = load_upcoming_unlocks(tradable_symbols=_landing_tradable_bases)
+_landing_supply = store.read_stablecoin_supply()
+
+_highlights = all_highlights(_landing_combined, _landing_unlocks, _landing_onchain, _landing_supply)
+
+if _highlights:
+    st.subheader("📰 Today's signals")
+    st.caption(
+        "One headline per source — best long, best short, hottest funding, biggest "
+        "upcoming unlock, whale spotlight, macro liquidity read. Pulls from the "
+        "same data the dedicated pages render, just curated to the single top "
+        "signal each. Empty entries mean that source hasn't produced a strong "
+        "signal yet (or first scan still pending)."
+    )
+    for h in _highlights:
+        st.markdown(f"**{h['emoji']} {h['label']}** — {h['headline']}")
+    st.divider()
+
+
 # Macro banner — stablecoin supply trend gives a read on liquidity entering/leaving crypto.
 _supply = store.read_stablecoin_supply()
 if _supply.get("TOTAL", {}).get("change_24h_pct") is not None:
