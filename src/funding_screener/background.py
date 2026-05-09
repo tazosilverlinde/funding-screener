@@ -81,6 +81,8 @@ class DataStore:
         # Composite-score history per (base_asset, quote_asset), trimmed to last 24h.
         # Each value is a list of (timestamp_utc, score_int) tuples in chronological order.
         self.score_history: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
+        # Per-loop cycle durations in seconds (last 50). Drives the perf expander.
+        self.loop_timings: dict[str, list[float]] = {}
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -184,6 +186,34 @@ class DataStore:
         with self._lock:
             return list(self.score_history.get(key, []))
 
+    def record_loop_duration(self, loop_name: str, duration_s: float) -> None:
+        """Append one cycle's wall-clock duration; keep last 50 per loop."""
+        with self._lock:
+            buf = self.loop_timings.setdefault(loop_name, [])
+            buf.append(duration_s)
+            if len(buf) > 50:
+                buf.pop(0)
+
+    def read_loop_stats(self) -> dict[str, dict]:
+        """Return {loop_name: {samples, avg_s, p50_s, p95_s, last_s}} for every
+        loop that has emitted at least one timing.
+        """
+        with self._lock:
+            out: dict[str, dict] = {}
+            for name, durations in self.loop_timings.items():
+                if not durations:
+                    continue
+                sorted_d = sorted(durations)
+                n = len(sorted_d)
+                out[name] = {
+                    "samples": n,
+                    "avg_s": sum(sorted_d) / n,
+                    "p50_s": sorted_d[n // 2],
+                    "p95_s": sorted_d[min(n - 1, int(n * 0.95))],
+                    "last_s": durations[-1],
+                }
+        return out
+
     def update_enrichments(self, items: list[EnrichmentData]) -> None:
         with self._lock:
             for it in items:
@@ -253,8 +283,10 @@ async def _fast_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
       - the client is in cooldown (after 418/429/451)
     Either condition silences error noise from a known-blocked exchange.
     """
+    import time as _t
     interval = 60
     while True:
+        cycle_start = _t.monotonic()
         try:
             bnb_on = is_binance_enabled() and not binance.is_cooled_down()
             mxc_on = is_mexc_enabled() and not mexc.is_cooled_down()
@@ -300,6 +332,7 @@ async def _fast_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
         except Exception as e:
             log.exception("fast loop error")
             store.record_error(f"fast-loop fatal: {type(e).__name__}: {e}")
+        store.record_loop_duration("fast", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -320,7 +353,9 @@ async def _slow_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
             break
         await asyncio.sleep(2)
 
+    import time as _t
     while True:
+        cycle_start = _t.monotonic()
         try:
             tasks = []
             if is_binance_enabled() and not binance.is_cooled_down():
@@ -332,13 +367,16 @@ async def _slow_loop(store: DataStore, binance: BinanceClient, mexc: MexcClient)
         except Exception as e:
             log.exception("slow loop error")
             store.record_error(f"slow-loop fatal: {type(e).__name__}: {e}")
+        store.record_loop_duration("slow", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
 async def _market_caps_loop(store: DataStore, mcap_client: CoinPaprikaClient) -> None:
     """Top-N USD market caps from CoinPaprika — every 5 minutes (one call per cycle)."""
+    import time as _t
     interval = 300
     while True:
+        cycle_start = _t.monotonic()
         try:
             mcaps = await mcap_client.fetch_market_caps_top_n(top_n=1000)
             if mcaps:
@@ -346,6 +384,7 @@ async def _market_caps_loop(store: DataStore, mcap_client: CoinPaprikaClient) ->
         except Exception as e:
             log.exception("market caps loop error")
             store.record_error(f"market-caps: {type(e).__name__}: {e}")
+        store.record_loop_duration("market_caps", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -354,8 +393,10 @@ async def _macro_loop(store: DataStore, llama: DefiLlamaClient) -> None:
 
     These move slowly (USDT issuance is daily-scale) so a long interval is fine.
     """
+    import time as _t
     interval = 900
     while True:
+        cycle_start = _t.monotonic()
         try:
             supply = await llama.fetch_stablecoin_supply()
             if supply:
@@ -363,6 +404,7 @@ async def _macro_loop(store: DataStore, llama: DefiLlamaClient) -> None:
         except Exception as e:
             log.exception("macro loop error")
             store.record_error(f"macro: {type(e).__name__}: {e}")
+        store.record_loop_duration("macro", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -474,6 +516,7 @@ async def _score_history_loop(store: DataStore) -> None:
     the landing page. In-memory only — process restart wipes history; signal
     recovers within one snapshot cycle.
     """
+    import time as _t
     interval = 600  # 10 min — fast enough to catch hourly movement, slow enough to be cheap
     # Wait for fast loop to populate funding before first snapshot.
     while True:
@@ -484,6 +527,7 @@ async def _score_history_loop(store: DataStore) -> None:
         await asyncio.sleep(2)
 
     while True:
+        cycle_start = _t.monotonic()
         try:
             bnb = store.read_binance()
             mxc = store.read_mexc()
@@ -517,6 +561,7 @@ async def _score_history_loop(store: DataStore) -> None:
         except Exception as e:
             log.exception("score history loop error")
             store.record_error(f"score-history: {type(e).__name__}: {e}")
+        store.record_loop_duration("score_history", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -542,7 +587,9 @@ async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> No
             break
         await asyncio.sleep(2)
 
+    import time as _t
     while True:
+        cycle_start = _t.monotonic()
         try:
             bnb = store.read_binance()
             mxc = store.read_mexc()
@@ -580,6 +627,7 @@ async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> No
         except Exception as e:
             log.exception("macro flow loop error")
             store.record_error(f"macro-flow: {type(e).__name__}: {e}")
+        store.record_loop_duration("macro_flow", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -607,7 +655,9 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
             break
         await asyncio.sleep(2)
 
+    import time as _t
     while True:
+        cycle_start = _t.monotonic()
         try:
             bnb = store.read_binance()
             mxc = store.read_mexc()
@@ -669,6 +719,7 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
         except Exception as e:
             log.exception("onchain loop error")
             store.record_error(f"onchain: {type(e).__name__}: {e}")
+        store.record_loop_duration("onchain", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -689,7 +740,9 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
             break
         await asyncio.sleep(2)
 
+    import time as _t
     while True:
+        cycle_start = _t.monotonic()
         try:
             bnb_on = is_binance_enabled() and not binance.is_cooled_down()
             mxc_on = is_mexc_enabled() and not mexc.is_cooled_down()
@@ -773,6 +826,7 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
         except Exception as e:
             log.exception("enrichment loop error")
             store.record_error(f"enrichment: {type(e).__name__}: {e}")
+        store.record_loop_duration("enrichment", _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 

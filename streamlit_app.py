@@ -261,6 +261,36 @@ if _sector_rows:
 
 st.divider()
 
+## ---- performance: per-loop cycle timings -----------------------------------
+_loop_stats = store.read_loop_stats()
+if _loop_stats:
+    with st.expander(f"Performance — background loop timings ({len(_loop_stats)} loops)", expanded=False):
+        st.caption(
+            "Each background loop reports its wall-clock cycle duration. "
+            "Compare avg vs p95 to spot spikes; large p95/avg ratio means at "
+            "least one cycle stalled (slow RPC, network blip, rate-limit). "
+            "Last-50-cycles rolling window."
+        )
+        perf_rows = []
+        for name in sorted(_loop_stats.keys()):
+            s = _loop_stats[name]
+            perf_rows.append({
+                "Loop": name,
+                "Samples": s["samples"],
+                "Last (s)": round(s["last_s"], 2),
+                "Avg (s)": round(s["avg_s"], 2),
+                "P50 (s)": round(s["p50_s"], 2),
+                "P95 (s)": round(s["p95_s"], 2),
+            })
+        st.dataframe(
+            pd.DataFrame(perf_rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Samples": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+
 with st.expander("Configuration", expanded=False):
     st.write("**Settings (`config/settings.yaml`)**")
     st.json(settings(), expanded=False)
