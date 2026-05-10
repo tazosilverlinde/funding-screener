@@ -106,6 +106,44 @@ def test_combined_high_funding_both_present():
     assert r.signal_emoji  # any non-empty
 
 
+def test_combined_high_funding_includes_funding_history_chart():
+    """Sparkline data flows from EnrichmentData.prev_funding_rates_percent.
+    API returns most-recent first; the row stores oldest→newest for charting.
+    """
+    from funding_screener.models import EnrichmentData
+
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    mxc: list[FundingRow] = []
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    enrich = {
+        ("Binance", "BTCUSDT"): EnrichmentData(
+            exchange="Binance",
+            symbol="BTCUSDT",
+            prev_funding_rates_percent=[0.5, 0.4, 0.3, 0.2, 0.1],  # newest-first
+            funding_streak_count=3,
+            funding_streak_direction="pos",
+            mark_index_spread_percent=0.0,
+            fetched_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        ),
+    }
+    out = screen_combined_high_funding(
+        bnb, mxc, bnb_c, [], enrich, threshold_percent=1.0,
+    )
+    assert len(out) == 1
+    r = out[0]
+    # Chart should be reversed → oldest first.
+    assert r.funding_history_chart == [0.1, 0.2, 0.3, 0.4, 0.5]
+
+
+def test_combined_high_funding_empty_history_when_no_enrichment():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+    )
+    assert out[0].funding_history_chart == []
+
+
 def test_combined_high_funding_only_one_side():
     """Base only on Binance: still flagged if Binance rate > threshold."""
     bnb = [_funding("Binance", "FOOUSDT", "FOO", "USDT", rate=2.5)]

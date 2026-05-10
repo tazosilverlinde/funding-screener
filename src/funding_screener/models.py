@@ -154,6 +154,11 @@ class CombinedFundingRow(_Frozen):
     # too-short history. Fresh signals (< 1h) deserve attention; stale ones
     # (> 12h) are likely already priced in.
     signal_age_hours: Optional[float] = None
+    # Last ~30 settled funding rates (oldest → newest), pulled from whichever
+    # exchange had the larger absolute funding (the side that drove the signal).
+    # Empty list when neither exchange has enrichment data yet. Used by the
+    # Page-2 sparkline column.
+    funding_history_chart: list[float] = []
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.

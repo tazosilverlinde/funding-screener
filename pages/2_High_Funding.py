@@ -159,6 +159,7 @@ df = to_df(
         "signal_short",
         "funding_deviation_label",
         "funding_deviation_z",
+        "funding_history_chart",
         "base_asset",
         "quote_asset",
         "sector",
@@ -208,10 +209,17 @@ if not df.empty:
     df["Dev"] = df["funding_deviation_label"].fillna("")
     df["Dev z"] = df["funding_deviation_z"]
     df = df.drop(columns=["funding_deviation_label", "funding_deviation_z"])
+    # Funding history sparkline (Round 31). Streamlit renders list-typed
+    # cells as inline mini line charts via column_config.LineChartColumn.
+    df["Trend"] = df["funding_history_chart"].apply(
+        lambda v: v if isinstance(v, list) and v else None
+    )
+    df = df.drop(columns=["funding_history_chart"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / σ / Age / Signal / Dev / Liq to the front.
-    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score label", "Signal", "Dev", "Dev z", "Liq 24h"]
+    # Move Score / Δ / σ / Age / Signal / Dev / Trend / Liq to the front.
+    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score label", "Signal",
+             "Dev", "Dev z", "Trend", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -357,6 +365,20 @@ if not df.empty:
                 "ascending shows undershoot extremes (squeeze candidates); "
                 "descending shows overshoot extremes (cooldown candidates)."
             ),
+        ),
+        "Trend": st.column_config.LineChartColumn(
+            "Trend",
+            help=(
+                "Inline sparkline of the last ~30 settled funding rates "
+                "(≈10 days at 8h cadence) for the side that drove the signal. "
+                "Y-scale auto-fits per row; values are the raw per-period rate "
+                "(use the Funding/Period column for the latest exact value).\n\n"
+                "Patterns to look for:\n"
+                "  • Recently flipped sign → regime change just happened\n"
+                "  • Persistently one-sided → sustained pressure (carry candidate)\n"
+                "  • Spiking up at the right edge → fresh acceleration"
+            ),
+            width="small",
         ),
         "Liq 24h": st.column_config.TextColumn(
             "Liq 24h",
