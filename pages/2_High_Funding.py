@@ -105,20 +105,78 @@ if sector_bases:
     rows = [r for r in rows if r.base_asset.upper() in sector_bases]
 
 cap = int(cfg["row_limit"])
+
+# ── Power-user filter sidebar (Round 40) ───────────────────────────────────
+# Composable filters so a user can ask "show me only Fresh setups with
+# |score| ≥ +50 and signal age ≤ 4h". All filters are off-by-default; the
+# table content with no boxes ticked matches what the page showed pre-Round-40.
+
+with st.sidebar.expander("🔎 Filters", expanded=False):
+    min_abs_score = st.slider(
+        "Min |composite score|",
+        min_value=0, max_value=100, value=0, step=5,
+        help="Drop rows whose absolute composite score is below this. "
+             "Set to 30 to hide neutrals; 70 to see only strong-conviction setups.",
+    )
+    quality_options = [
+        "Fresh bull", "Fresh bear", "Building bull", "Building bear",
+        "Mature bull", "Mature bear", "Late bull", "Late bear", "Noisy",
+    ]
+    selected_qualities = st.multiselect(
+        "Quality buckets",
+        quality_options,
+        default=[],
+        help="Empty = include every quality. Pick one or more to narrow. "
+             "Tip: select Fresh bull + Building bull for actionable long setups; "
+             "exclude Noisy / Late / — to drop low-quality and stale rows.",
+    )
+    age_min_h = st.number_input(
+        "Min signal age (hours)",
+        min_value=0.0, max_value=72.0, value=0.0, step=0.5,
+        help="Lower bound on signal age. 0 = no lower bound.",
+    )
+    age_max_h = st.number_input(
+        "Max signal age (hours)",
+        min_value=0.0, max_value=72.0, value=0.0, step=0.5,
+        help="Upper bound on signal age. 0 = no upper bound. Set to 4 to "
+             "see only fresh-to-developing setups.",
+    )
+    max_sigma = st.number_input(
+        "Max σ 24h",
+        min_value=0.0, max_value=100.0, value=0.0, step=5.0,
+        help="Drop rows with composite-score stddev above this. 0 = no filter. "
+             "Set to 30 to exclude noisy regimes (same as the legacy 'Hide unstable' toggle).",
+    )
+
+# Apply filters in order. Each uses None-safe predicates so a row missing
+# data passes through (we only drop on positive evidence of a violation).
 capped_rows = rows[:cap]
-# Score-stability sidebar filter — added Round 27.
-hide_unstable = st.sidebar.checkbox(
-    "Hide unstable signals (σ > 30)",
-    value=False,
-    help="Drop rows where the 24h composite-score std-dev exceeds 30 — "
-         "those are noisy regimes where the signal flips around. Off by "
-         "default so you see everything; on when you only want clean "
-         "persistent setups.",
-)
-if hide_unstable:
+if min_abs_score > 0:
     capped_rows = [
         r for r in capped_rows
-        if r.composite_score_stddev_24h is None or r.composite_score_stddev_24h <= 30
+        if r.composite_score is not None and abs(r.composite_score) >= min_abs_score
+    ]
+if selected_qualities:
+    # setup_quality_label is "🚀 Fresh bull" etc. — match by substring on the
+    # word part so emoji differences don't break matches.
+    capped_rows = [
+        r for r in capped_rows
+        if r.setup_quality_label and any(q in r.setup_quality_label for q in selected_qualities)
+    ]
+if age_min_h > 0:
+    capped_rows = [
+        r for r in capped_rows
+        if r.signal_age_hours is not None and r.signal_age_hours >= age_min_h
+    ]
+if age_max_h > 0:
+    capped_rows = [
+        r for r in capped_rows
+        if r.signal_age_hours is not None and r.signal_age_hours <= age_max_h
+    ]
+if max_sigma > 0:
+    capped_rows = [
+        r for r in capped_rows
+        if r.composite_score_stddev_24h is None or r.composite_score_stddev_24h <= max_sigma
     ]
 
 # Liquidation skew per Binance symbol — pulled fresh each render. We compute
