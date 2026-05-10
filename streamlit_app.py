@@ -534,6 +534,28 @@ if _loop_stats:
             "least one cycle stalled (slow RPC, network blip, rate-limit). "
             "Last-50-cycles rolling window."
         )
+        # ── Process memory budget (Round 51) ─────────────────────────────
+        # Surfaces RSS against the user's 2GB hard cap. Color-coded by
+        # pressure bucket so excess shows up immediately.
+        from funding_screener.process_memory import (  # noqa: E402
+            PROCESS_MEMORY_BUDGET_MB,
+            current_process_memory_mb,
+            memory_pressure_label,
+        )
+        _rss_mb = current_process_memory_mb()
+        if _rss_mb is not None:
+            _pressure = memory_pressure_label(_rss_mb)
+            _pct_used = (_rss_mb / PROCESS_MEMORY_BUDGET_MB) * 100.0
+            _bar_box = {
+                "ok": st.success,
+                "warn": st.info,
+                "crit": st.error,
+            }.get(_pressure, st.info)
+            _bar_box(
+                f"**Process memory:** `{_rss_mb:,.0f} MB` of "
+                f"`{PROCESS_MEMORY_BUDGET_MB:,.0f} MB` budget used ({_pct_used:.0f}%) — "
+                f"{'OK' if _pressure == 'ok' else 'WATCH' if _pressure == 'warn' else 'CRITICAL'}"
+            )
         perf_rows = []
         for name in sorted(_loop_stats.keys()):
             s = _loop_stats[name]
