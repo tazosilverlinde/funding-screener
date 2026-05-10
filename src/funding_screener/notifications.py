@@ -466,6 +466,41 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
     return out
 
 
+def evaluate_memory_pressure_alert(
+    rss_mb: Optional[float],
+    budget_mb: float = 2048.0,
+    pct_threshold: float = 75.0,
+) -> list[tuple[str, str, str]]:
+    """Memory-pressure alert (Round 52).
+
+    Fires when current process RSS crosses `pct_threshold`% of `budget_mb`.
+    Single alert key (`memory_pressure`) — independent of the per-symbol
+    state machine. AlertState handles the on/off transition so the user
+    gets ONE message when crossing into pressure and ONE resolved message
+    when it clears.
+
+    Returns [] when rss_mb is None (psutil unavailable / read failed) so
+    a missing sensor never spams.
+    """
+    if rss_mb is None or budget_mb <= 0:
+        return []
+    pct = (rss_mb / budget_mb) * 100.0
+    key = "memory_pressure"
+    if pct >= pct_threshold:
+        msg = (
+            f"⚠️ *Memory pressure* — process RSS at `{rss_mb:,.0f} MB` "
+            f"({pct:.0f}% of {budget_mb:,.0f} MB budget)\n"
+            f"Crossed the {pct_threshold:.0f}% pressure threshold. "
+            "Investigate buffer growth (liquidations / score history / klines) "
+            "before the process hits the hard cap."
+        )
+        return [(key, "active", msg)]
+    return [(
+        key, "resolved",
+        f"📉 Memory pressure cleared — RSS back to {rss_mb:,.0f} MB ({pct:.0f}% of budget).",
+    )]
+
+
 def evaluate_oi_surge_alerts(
     combined_rows,
     threshold_pct_24h: float = 50.0,

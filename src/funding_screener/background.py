@@ -41,6 +41,7 @@ from .notifications import (
     evaluate_funding_alerts,
     evaluate_funding_deviation_alerts,
     evaluate_liquidation_cascade_alerts,
+    evaluate_memory_pressure_alert,
     evaluate_new_listing_alerts,
     evaluate_oi_surge_alerts,
     evaluate_score_delta_alerts,
@@ -53,6 +54,10 @@ from .notifications import (
     format_alert_summary_digest,
     load_alerts_config,
     parse_watchlist,
+)
+from .process_memory import (
+    PROCESS_MEMORY_BUDGET_MB,
+    current_process_memory_mb,
 )
 from .sectors import sector_aggregates as _sector_aggregates
 from .unlocks import load_upcoming_unlocks as _load_upcoming_unlocks
@@ -695,6 +700,19 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 upcoming = load_upcoming_unlocks(tradable_symbols=tradable)
                 days = int(cfg["token_unlock"].get("days_ahead", 3))
                 events.extend(evaluate_unlock_alerts(upcoming, days))
+
+            # Memory-pressure alert (Round 52). Reads RSS once per loop tick
+            # and compares against the user's hard 2GB cap. Closes the loop on
+            # the Round 51 monitoring — operators get a Telegram heads-up
+            # before the process hits the cap.
+            if cfg.get("memory_pressure", {}).get("enabled", True):
+                mp = cfg["memory_pressure"]
+                rss_mb = current_process_memory_mb()
+                events.extend(evaluate_memory_pressure_alert(
+                    rss_mb,
+                    budget_mb=float(mp.get("budget_mb", PROCESS_MEMORY_BUDGET_MB)),
+                    pct_threshold=float(mp.get("pct_threshold", 75.0)),
+                ))
 
             # Apply state machine: fire only on off→on transitions, send "resolved"
             # only for previously-active keys. Each successful fire is recorded

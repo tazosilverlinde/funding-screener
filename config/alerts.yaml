@@ -58,6 +58,16 @@ alerts:
     threshold: 30          # alert when |avg_score| >= this
     min_token_count: 3     # require at least N tokens in the sector
 
+  # Memory-pressure alert (Round 52) — fires when process RSS crosses
+  # `pct_threshold`% of `budget_mb`. Closes the loop on the 2GB hard cap:
+  # operators get a Telegram heads-up before the process is at risk of
+  # crashing. State-machine handles transitions so it sends ONE message
+  # crossing in and ONE crossing out.
+  memory_pressure:
+    enabled: true
+    budget_mb: 2048           # the hard cap; matches process_memory.PROCESS_MEMORY_BUDGET_MB
+    pct_threshold: 75         # alert when RSS / budget * 100 >= this
+
   # Alert summary digest (Round 50) — sends ONE batched Telegram message
   # every `interval_minutes` summarizing every alert that fired since the
   # previous summary, grouped by kind. Complementary to per-event firing
