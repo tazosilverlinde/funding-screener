@@ -34,6 +34,7 @@ from .notifications import (
     evaluate_funding_deviation_alerts,
     evaluate_liquidation_cascade_alerts,
     evaluate_new_listing_alerts,
+    evaluate_oi_surge_alerts,
     evaluate_score_delta_alerts,
     evaluate_unlock_alerts,
     evaluate_whale_flow_alerts,
@@ -530,6 +531,14 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     events.extend(evaluate_funding_deviation_alerts(
                         combined_rows,
                         z_threshold=float(fd.get("z_threshold", 2.5)),
+                    ))
+                # OI 24h surge — config existed since the alerts system shipped
+                # but evaluator wasn't wired until Round 20.
+                if cfg.get("oi_surge", {}).get("enabled", True):
+                    os_cfg = cfg["oi_surge"]
+                    events.extend(evaluate_oi_surge_alerts(
+                        combined_rows,
+                        threshold_pct_24h=float(os_cfg.get("threshold_pct_24h", 50.0)),
                     ))
             except Exception as e:
                 log.warning("alerts: composite evaluator failed: %s", e)

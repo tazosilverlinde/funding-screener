@@ -185,6 +185,51 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
     return out
 
 
+def evaluate_oi_surge_alerts(
+    combined_rows,
+    threshold_pct_24h: float = 50.0,
+) -> list[tuple[str, str, str]]:
+    """Open Interest 24h surge alert (Round 20).
+
+    Fires when |OI Δ over 24h| crosses `threshold_pct_24h`. The direction is
+    encoded in the message — surges UP usually mean fresh leverage entering
+    (continuation potential, also liquidation risk if it goes wrong); surges
+    DOWN mean rapid unwind (squeeze relief, capitulation, or liquidation
+    cascade aftermath).
+
+    Reads `binance_oi_change_24h_pct` from the combined screener rows so
+    we don't refetch — the enrichment loop already populated it.
+
+    Was configured in alerts.yaml since the alerts system shipped but had
+    no evaluator until this round.
+    """
+    out: list[tuple[str, str, str]] = []
+    for r in combined_rows:
+        oi_pct = getattr(r, "binance_oi_change_24h_pct", None)
+        if oi_pct is None:
+            continue
+        sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+        key = f"oi_surge:{r.base_asset}/{r.quote_asset}"
+        if abs(oi_pct) >= threshold_pct_24h:
+            if oi_pct > 0:
+                emoji = "📈"
+                direction = "Fresh leverage entering — continuation possible, but high-liq risk if move reverses"
+            else:
+                emoji = "📉"
+                direction = "Rapid unwind — short squeeze relief, capitulation, or post-cascade settlement"
+            msg = (
+                f"{emoji} *{sym}* — OI Δ24h `{oi_pct:+.1f}%`\n"
+                f"{direction}"
+            )
+            out.append((key, "active", msg))
+        else:
+            out.append((
+                key, "resolved",
+                f"📊 {sym} OI 24h Δ back to {oi_pct:+.1f}% (under {threshold_pct_24h:.0f}% threshold).",
+            ))
+    return out
+
+
 def evaluate_funding_deviation_alerts(
     combined_rows,
     z_threshold: float = 2.5,

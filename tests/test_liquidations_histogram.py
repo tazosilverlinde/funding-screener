@@ -35,13 +35,27 @@ def test_empty_buffer_returns_zeroed_bins_with_consistent_x_axis():
 
 
 def test_events_land_in_correct_bin():
+    """Place each event at a deterministic offset from the bin floor so the
+    test isn't flaky on bin boundaries. We use now_floor as the reference
+    point — the same floor histogram() uses internally — so events are
+    placed mid-bin regardless of wallclock when the test runs.
+    """
     buf = LiquidationsBuffer()
     now = time.time()
-    # An event 30 min ago lands in the most-recent (current) bin.
-    buf.add(_ev("BTCUSDT", "long", 5_000_000, now - 30 * 60))
-    # An event 90 min ago lands in the previous bin.
-    buf.add(_ev("BTCUSDT", "short", 3_000_000, now - 90 * 60))
-    out = buf.histogram("BTCUSDT", bin_seconds=3600, window_seconds=24 * 3600)
+    bin_size = 3600
+    now_floor = (int(now) // bin_size) * bin_size
+    # Mid-current-bin: 30 min into the current hour.
+    in_current_bin_ts = now_floor + bin_size // 2
+    # Mid-previous-bin: 30 min into the previous hour.
+    in_prev_bin_ts = now_floor - bin_size + bin_size // 2
+    # Future timestamps relative to now_floor will skip the cutoff prune; use
+    # the past variant if needed. now_floor + 30min may be > now (causing
+    # prune drop) so always subtract back into the past.
+    if in_current_bin_ts > now:
+        in_current_bin_ts = now - 1  # safely in current bin
+    buf.add(_ev("BTCUSDT", "long", 5_000_000, in_current_bin_ts))
+    buf.add(_ev("BTCUSDT", "short", 3_000_000, in_prev_bin_ts))
+    out = buf.histogram("BTCUSDT", bin_seconds=bin_size, window_seconds=24 * 3600)
     # Last bin = current hour = +5M long.
     assert out[-1]["long_liq_usd"] == pytest.approx(5_000_000)
     assert out[-1]["short_liq_usd"] == 0.0
