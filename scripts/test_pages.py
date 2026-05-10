@@ -30,6 +30,7 @@ PAGES = [
     "pages/6_Whale_Flows.py",
     "pages/7_Token_Unlocks.py",
     "pages/8_Liquidations.py",
+    "pages/9_Daily_Digest.py",
 ]
 
 

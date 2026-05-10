@@ -74,12 +74,23 @@ def test_events_outside_window_excluded():
     assert long_total == pytest.approx(1_000)
 
 
+def _in_current_bin(now: float, bin_size: int = 3600) -> float:
+    """Return a timestamp guaranteed to fall in the current (rightmost) bin.
+
+    Anchoring to now_floor + 1 avoids the edge case where 'now - X' lands in
+    the previous bin if X happens to span a bin boundary.
+    """
+    now_floor = (int(now) // bin_size) * bin_size
+    return min(now_floor + 1.0, now - 0.5)
+
+
 def test_histogram_long_and_short_separated():
     """Same bin, both sides — they should NOT collapse together."""
     buf = LiquidationsBuffer()
     now = time.time()
-    buf.add(_ev("BTCUSDT", "long", 1_000_000, now - 600))
-    buf.add(_ev("BTCUSDT", "short", 2_000_000, now - 600))
+    ts = _in_current_bin(now)
+    buf.add(_ev("BTCUSDT", "long", 1_000_000, ts))
+    buf.add(_ev("BTCUSDT", "short", 2_000_000, ts))
     out = buf.histogram("BTCUSDT", bin_seconds=3600)
     last = out[-1]
     assert last["long_liq_usd"] == pytest.approx(1_000_000)
@@ -90,8 +101,9 @@ def test_histogram_long_and_short_separated():
 def test_count_field_aggregates_event_count():
     buf = LiquidationsBuffer()
     now = time.time()
+    ts = _in_current_bin(now)
     for i in range(5):
-        buf.add(_ev("BTCUSDT", "long", 100, now - 100 - i))
+        buf.add(_ev("BTCUSDT", "long", 100, ts - i * 0.001))
     out = buf.histogram("BTCUSDT", bin_seconds=3600)
     last = out[-1]
     assert last["count"] == 5
