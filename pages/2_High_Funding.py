@@ -96,8 +96,42 @@ if sector_bases:
     rows = [r for r in rows if r.base_asset.upper() in sector_bases]
 
 cap = int(cfg["row_limit"])
+capped_rows = rows[:cap]
+
+# Liquidation skew per Binance symbol — pulled fresh each render. We compute
+# the label list here (in row order) and attach it to df after construction
+# so the data lines up regardless of pandas' column ordering.
+_liq_stats_all = store.read_liquidations(window_seconds=24 * 3600)
+
+
+def _liq_label_for(symbol: str | None) -> str:
+    if not symbol:
+        return ""
+    s = _liq_stats_all.get(symbol)
+    if not s:
+        return ""
+    total = s.get("total_usd", 0.0) or 0.0
+    if total < 100_000:  # below noise floor — don't clutter the table
+        return ""
+    long_u = s.get("long_liq_usd", 0.0) or 0.0
+    short_u = s.get("short_liq_usd", 0.0) or 0.0
+    skew = (short_u - long_u) / total if total > 0 else 0.0
+    # Skew > 0 = shorts blew out (bullish); < 0 = longs blew out (bearish).
+    if skew > 0.5:
+        emoji = "🟢"
+    elif skew < -0.5:
+        emoji = "🔴"
+    else:
+        emoji = "🟡"
+    if total >= 1e6:
+        return f"{emoji} ${total / 1e6:.1f}M"
+    return f"{emoji} ${total / 1e3:.0f}K"
+
+
+_liq_labels = [_liq_label_for(r.binance_symbol) for r in capped_rows]
+
 df = to_df(
-    [r.model_dump() for r in rows[:cap]],
+    [r.model_dump() for r in capped_rows],
     column_order=[
         "composite_score",
         "composite_score_delta_1h",
@@ -153,8 +187,10 @@ if not df.empty:
     df["Dev"] = df["funding_deviation_label"].fillna("")
     df["Dev z"] = df["funding_deviation_z"]
     df = df.drop(columns=["funding_deviation_label", "funding_deviation_z"])
-    # Move Score / Δ / Signal / Dev to the front.
-    front = ["Score", "Δ 1h", "Score label", "Signal", "Dev", "Dev z"]
+    # 24h liquidation bias for the Binance symbol (Round 16).
+    df["Liq 24h"] = _liq_labels
+    # Move Score / Δ / Signal / Dev / Liq to the front.
+    front = ["Score", "Δ 1h", "Score label", "Signal", "Dev", "Dev z", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -271,6 +307,20 @@ if not df.empty:
                 "Numeric z-score of the funding-deviation column above. Sortable: "
                 "ascending shows undershoot extremes (squeeze candidates); "
                 "descending shows overshoot extremes (cooldown candidates)."
+            ),
+        ),
+        "Liq 24h": st.column_config.TextColumn(
+            "Liq 24h",
+            help=(
+                "Total liquidations over the last 24h on the Binance perp, with "
+                "directional bias.\n\n"
+                "🟢 = shorts dominantly liquidated (squeeze in progress, bullish)\n"
+                "🔴 = longs dominantly liquidated (cascade, often a sharp drop)\n"
+                "🟡 = mixed / balanced.\n\n"
+                "Empty when no Binance symbol exists for the row, or when 24h "
+                "total is below $100K (noise floor). Buffer is in-memory only — "
+                "first events arrive seconds after deploy and the 24h window "
+                "fills in over a day."
             ),
         ),
         "Base": st.column_config.TextColumn(
