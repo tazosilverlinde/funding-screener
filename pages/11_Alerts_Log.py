@@ -44,6 +44,47 @@ st.caption(
 log = store.alert_log
 total_logged = len(log)
 
+
+# ---- mute controls (Round 25) ----
+with st.expander("🔕 Mute alerts", expanded=False):
+    st.caption(
+        "Suppress noisy alert kinds or symbols for a few hours without changing "
+        "your config files. Mutes are in-memory and clear on restart. Muted "
+        "alerts skip Telegram delivery AND the audit log below."
+    )
+    active_mutes = store.read_alert_mutes()
+    if active_mutes:
+        st.markdown("**Active mutes:**")
+        for pattern, expiry in sorted(active_mutes.items(), key=lambda x: x[1]):
+            mins_left = int((expiry - datetime.now(timezone.utc).timestamp()) / 60)
+            mc1, mc2 = st.columns([4, 1])
+            mc1.write(f"`{pattern}` — expires in {mins_left} min")
+            if mc2.button("Unmute", key=f"unmute_{pattern}"):
+                store.unmute_alert(pattern)
+                st.rerun()
+
+    st.markdown("**Add a new mute:**")
+    add_c1, add_c2, add_c3, add_c4 = st.columns([1, 2, 1, 1])
+    pattern_type = add_c1.selectbox(
+        "Type", ["kind", "symbol"],
+        help="kind = mute every alert of this type (e.g. composite, score_delta). "
+             "symbol = mute every alert mentioning this symbol substring (e.g. BTCUSDT).",
+    )
+    pattern_value = add_c2.text_input(
+        "Value",
+        placeholder="e.g. score_delta" if pattern_type == "kind" else "e.g. BTCUSDT",
+    )
+    duration_h = add_c3.number_input(
+        "Hours", min_value=0.5, max_value=72.0, value=4.0, step=0.5,
+        help="Mute duration. Capped at 72h to prevent forgotten silencing.",
+    )
+    if add_c4.button("Mute", disabled=not pattern_value):
+        full_pattern = f"{pattern_type}:{pattern_value.strip()}"
+        store.mute_alert(full_pattern, hours=float(duration_h))
+        st.success(f"Muted `{full_pattern}` for {duration_h:g}h")
+        st.rerun()
+
+
 if total_logged == 0:
     st.info(
         "No alerts have fired since process start. Either the market is "

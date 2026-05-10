@@ -111,6 +111,11 @@ class DataStore:
         # hours without scrolling Telegram. Wiped on process restart — same
         # tradeoff as score_history.
         self.alert_log = AlertLog()
+        # Alert mutes: pattern → unix-seconds expiry. Two flavours:
+        #   - "kind:foo"      → mutes EVERY alert whose kind == "foo"
+        #   - "symbol:BTCUSDT" → mutes every alert mentioning that symbol
+        # Wipes on restart by design — short-lived suppressions only.
+        self.alert_mutes: dict[str, float] = {}
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -301,6 +306,39 @@ class DataStore:
     ) -> list[dict]:
         """Per-bin {ts, long_liq_usd, short_liq_usd, count} for one symbol."""
         return self.liquidations.histogram(symbol, bin_seconds, window_seconds)
+
+    def mute_alert(self, pattern: str, hours: float) -> None:
+        """Silence an alert pattern for `hours` from now. Idempotent: re-muting
+        the same pattern extends the expiry. Use 'kind:foo' to mute by alert
+        kind, 'symbol:BTCUSDT' to mute by symbol substring.
+        """
+        with self._lock:
+            self.alert_mutes[pattern] = time.time() + (hours * 3600)
+
+    def unmute_alert(self, pattern: str) -> None:
+        with self._lock:
+            self.alert_mutes.pop(pattern, None)
+
+    def is_alert_muted(self, kind: str, key: str) -> bool:
+        """Returns True if an alert of this kind/key matches an active mute."""
+        now = time.time()
+        with self._lock:
+            # Drop expired mutes lazily so the dict doesn't accrete forever.
+            expired = [p for p, exp in self.alert_mutes.items() if exp <= now]
+            for p in expired:
+                del self.alert_mutes[p]
+            for pattern in self.alert_mutes:
+                if pattern == f"kind:{kind}":
+                    return True
+                if pattern.startswith("symbol:") and pattern[len("symbol:"):] in key:
+                    return True
+        return False
+
+    def read_alert_mutes(self) -> dict[str, float]:
+        """Snapshot of active mutes — pattern → expiry-unix-seconds."""
+        now = time.time()
+        with self._lock:
+            return {p: exp for p, exp in self.alert_mutes.items() if exp > now}
 
     # ---- readers (thread-safe; called from Streamlit page renders) ----
 
@@ -597,6 +635,17 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
             # to store.alert_log so the audit page can render the history even
             # for users who don't have Telegram configured.
             for key, status, msg in events:
+                kind = key.split(":", 1)[0] if ":" in key else key
+                # User-controlled mute: skip notification AND audit logging
+                # entirely. AlertState still tracks active/resolved transitions
+                # so when the mute lifts we don't double-fire on the same regime.
+                if store.is_alert_muted(kind, key):
+                    if status == "active":
+                        if state.should_fire(key, cooldown_s):
+                            state.mark_fired(key)
+                    elif status == "resolved" and key in state.active_keys:
+                        state.mark_resolved(key)
+                    continue
                 if status == "active":
                     if state.should_fire(key, cooldown_s):
                         ok = await telegram.send(msg)
