@@ -33,6 +33,7 @@ PAGES = [
     "pages/9_Daily_Digest.py",
     "pages/10_Cross_Exchange_Arb.py",
     "pages/11_Alerts_Log.py",
+    "pages/12_System_Health.py",
 ]
 
 

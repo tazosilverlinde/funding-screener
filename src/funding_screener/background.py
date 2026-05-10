@@ -120,6 +120,9 @@ class DataStore:
         # Driven by record_loop_duration; consumed by the loop-stall alert
         # (Round 55) to detect silent stalls.
         self.last_loop_ran_at: dict[str, datetime] = {}
+        # Recent-errors ring buffer (Round 56). last_error keeps the freshest;
+        # this is the last 50 with timestamps for the System Health page.
+        self.recent_errors: list[tuple[datetime, str]] = []
         # 24h rolling buffer of liquidation events from the Binance forceOrder
         # WebSocket stream. Owns its own asyncio.Lock; safe to call aggregate_*
         # from any thread because the underlying deques only mutate via the WS
@@ -330,8 +333,29 @@ class DataStore:
             return dict(self.enrichments)
 
     def record_error(self, msg: str) -> None:
+        """Record the latest error AND append to a bounded ring buffer (Round 56).
+
+        last_error keeps the existing "freshest only" semantics for callers
+        that just want the most recent issue. recent_errors is a 50-entry
+        ring of (timestamp, msg) so the System Health page can render a
+        scroll of the last few — useful for diagnosing intermittent issues.
+        Empty `msg` clears last_error (existing behavior) but is NOT logged.
+        """
         with self._lock:
             self.last_error = msg
+            if msg:
+                buf = getattr(self, "recent_errors", None)
+                if buf is None:
+                    self.recent_errors = []
+                    buf = self.recent_errors
+                buf.append((datetime.now(timezone.utc), msg))
+                if len(buf) > 50:
+                    buf.pop(0)
+
+    def read_recent_errors(self) -> list[tuple[datetime, str]]:
+        """Snapshot of the recent-errors ring (newest last)."""
+        with self._lock:
+            return list(getattr(self, "recent_errors", []) or [])
 
     def read_liquidations(self, symbol: str | None = None, window_seconds: int | None = None) -> dict:
         """Snapshot of the liquidations buffer.
