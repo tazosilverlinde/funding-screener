@@ -113,21 +113,28 @@ mcap_usd = market_caps.get(base_asset)
 
 @st.cache_data(ttl=120, show_spinner="Fetching open-interest and long/short ratio…")
 def _binance_extras(symbol: str) -> dict:
+    """Fetch 24h history of OI, retail L/S ratio, and top-trader L/S ratio.
+
+    All three use period=1h, limit=24 so we get matching x-axes for charts.
+    The L/S endpoints accept the same period/limit params as OI; we used to
+    request limit=1 (current value only) but now grab the trajectory so the
+    page can render a 24h trend mini-chart for each.
+    """
     async def _go():
         client = BinanceClient()
         try:
             results = await asyncio.gather(
                 client.fetch_open_interest_history(symbol, period="1h", limit=24),
-                client.fetch_long_short_ratio_global(symbol, period="1h", limit=1),
-                client.fetch_long_short_ratio_top(symbol, period="1h", limit=1),
+                client.fetch_long_short_ratio_global_history(symbol, period="1h", limit=24),
+                client.fetch_long_short_ratio_top_history(symbol, period="1h", limit=24),
                 return_exceptions=True,
             )
         finally:
             await client.aclose()
         return {
             "oi_history": results[0] if not isinstance(results[0], Exception) else [],
-            "ls_global": results[1] if not isinstance(results[1], Exception) else None,
-            "ls_top": results[2] if not isinstance(results[2], Exception) else None,
+            "ls_global_history": results[1] if not isinstance(results[1], Exception) else [],
+            "ls_top_history": results[2] if not isinstance(results[2], Exception) else [],
         }
 
     return run_async(_go)
@@ -385,19 +392,81 @@ if exchange == "Binance":
     else:
         r2.metric("Open Interest", "—")
 
-    ls_global = extras.get("ls_global")
+    # L/S ratio cards now read the latest value from the history series so the
+    # cards and the trend chart below stay in sync.
+    ls_global_hist = extras.get("ls_global_history") or []
+    ls_top_hist = extras.get("ls_top_history") or []
+
+    def _last_ratio(hist: list[dict]) -> float | None:
+        if not hist:
+            return None
+        try:
+            return float(hist[-1].get("longShortRatio", 0))
+        except (TypeError, ValueError):
+            return None
+
+    ls_global = _last_ratio(ls_global_hist)
+    ls_top = _last_ratio(ls_top_hist)
     r3.metric(
         "L/S ratio (retail)",
         f"{ls_global:.2f}" if ls_global is not None else "—",
         help="Global account long/short ratio. > 2 = crowded long; < 0.5 = crowded short. Contrarian at extremes.",
     )
-
-    ls_top = extras.get("ls_top")
     r4.metric(
         "L/S ratio (top traders)",
         f"{ls_top:.2f}" if ls_top is not None else "—",
         help="Top-20%-by-collateral account L/S ratio. Compare to retail — divergence = smart vs dumb money.",
     )
+
+    # ── 24h trend charts: OI + L/S — added Round 11 ───────────────────────
+    # Two side-by-side charts so the user sees the *direction* of these two
+    # metrics, not just their current value. A ratio of 2.0 that just spiked
+    # from 1.0 reads very differently than 2.0 trending steady for 24h.
+    chart_col1, chart_col2 = st.columns(2)
+    if oi_hist:
+        try:
+            oi_chart_df = pd.DataFrame(
+                {
+                    "OI ($M)": [
+                        float(p.get("sumOpenInterestValue", 0) or 0) / 1e6
+                        for p in oi_hist
+                    ],
+                },
+                index=pd.to_datetime(
+                    [int(p.get("timestamp", 0)) for p in oi_hist], unit="ms",
+                ),
+            )
+            chart_col1.write("**Open Interest — last 24h (hourly)**")
+            chart_col1.line_chart(oi_chart_df, height=200)
+            chart_col1.caption(
+                "Rising trend = real notional entering. Sharp drop = liquidation/unwind."
+            )
+        except Exception as e:
+            chart_col1.write("OI chart unavailable.")
+    else:
+        chart_col1.info("OI history not yet available.")
+
+    if ls_global_hist or ls_top_hist:
+        try:
+            ls_data: dict[pd.Timestamp, dict[str, float]] = {}
+            for p in ls_global_hist:
+                ts = pd.to_datetime(int(p.get("timestamp", 0)), unit="ms")
+                ls_data.setdefault(ts, {})["Retail"] = float(p.get("longShortRatio", 0) or 0)
+            for p in ls_top_hist:
+                ts = pd.to_datetime(int(p.get("timestamp", 0)), unit="ms")
+                ls_data.setdefault(ts, {})["Top traders"] = float(p.get("longShortRatio", 0) or 0)
+            if ls_data:
+                ls_chart_df = pd.DataFrame.from_dict(ls_data, orient="index").sort_index()
+                chart_col2.write("**L/S ratio — last 24h (hourly)**")
+                chart_col2.line_chart(ls_chart_df, height=200)
+                chart_col2.caption(
+                    "Both lines crossing 1.0 in the same direction = consensus shift. "
+                    "Diverging = retail vs smart money disagreement."
+                )
+        except Exception as e:
+            chart_col2.write("L/S chart unavailable.")
+    else:
+        chart_col2.info("L/S history not yet available.")
 
     # Risk explanation
     risk_msgs: list[str] = []

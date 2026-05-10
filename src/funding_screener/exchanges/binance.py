@@ -221,6 +221,27 @@ class BinanceClient:
         except (TypeError, ValueError):
             return None
 
+    async def fetch_long_short_ratio_global_history(
+        self, symbol: str, period: str = "1h", limit: int = 24,
+    ) -> list[dict]:
+        """Full L/S ratio history (oldest → newest), each item:
+        {timestamp, longShortRatio, longAccount, shortAccount}.
+
+        Used by the Symbol Detail page to render a 24h trend chart rather than
+        showing only a single point-in-time value.
+        """
+        params = {"symbol": symbol, "period": period, "limit": limit}
+        raw = await self._get("/futures/data/globalLongShortAccountRatio", params)
+        return raw or []
+
+    async def fetch_long_short_ratio_top_history(
+        self, symbol: str, period: str = "1h", limit: int = 24,
+    ) -> list[dict]:
+        """Top-trader L/S ratio history (oldest → newest)."""
+        params = {"symbol": symbol, "period": period, "limit": limit}
+        raw = await self._get("/futures/data/topLongShortAccountRatio", params)
+        return raw or []
+
 
 def _binance_quote_for(symbol: str) -> str | None:
     for q in ("USDT", "USDC"):
