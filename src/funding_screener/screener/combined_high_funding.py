@@ -219,6 +219,22 @@ def screen_combined_high_funding(
         if vol_30d is not None and vol_30d > 0 and sig_funding is not None:
             funding_per_vol = sig_funding / (vol_30d / 100.0)
 
+        # Close-to-close % returns over 1d / 7d windows (Round 44).
+        # Pulled from the same klines we used for vol — daily bars, oldest-first.
+        # None when not enough history (kline cache may have <8 bars on fresh deploy)
+        # or when the close on either side is non-positive (corrupt data).
+        pct_1d_val: Optional[float] = None
+        pct_7d_val: Optional[float] = None
+        if klines_for_vol and len(klines_for_vol) >= 2:
+            latest_close = klines_for_vol[-1].close
+            prev_close_1d = klines_for_vol[-2].close
+            if latest_close > 0 and prev_close_1d > 0:
+                pct_1d_val = (latest_close / prev_close_1d - 1.0) * 100.0
+            if len(klines_for_vol) >= 8:
+                prev_close_7d = klines_for_vol[-8].close
+                if latest_close > 0 and prev_close_7d > 0:
+                    pct_7d_val = (latest_close / prev_close_7d - 1.0) * 100.0
+
         out.append(
             CombinedFundingRow(
                 base_asset=base,
@@ -278,6 +294,8 @@ def screen_combined_high_funding(
                 score_history_chart=score_chart,
                 liq_net_hourly_chart=liq_net_chart,
                 setup_quality_label=None,  # filled in below after composite is final
+                pct_1d=pct_1d_val,
+                pct_7d=pct_7d_val,
             )
         )
     # Setup quality is computed after row construction so we can pass the

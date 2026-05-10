@@ -225,6 +225,8 @@ df = to_df(
         "signal_short",
         "funding_deviation_label",
         "funding_deviation_z",
+        "pct_1d",
+        "pct_7d",
         "funding_history_chart",
         "score_history_chart",
         "liq_net_hourly_chart",
@@ -297,10 +299,15 @@ if not df.empty:
     # Setup quality classification (Round 34).
     df["Quality"] = df["setup_quality_label"].fillna("—")
     df = df.drop(columns=["setup_quality_label"])
+    # Price-change columns (Round 44) — close-to-close 1d/7d from daily klines.
+    df["1d %"] = df["pct_1d"]
+    df["7d %"] = df["pct_7d"]
+    df = df.drop(columns=["pct_1d", "pct_7d"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / σ / Age / Quality / Score-trend / Signal / Dev / Funding / Liq trend / Liq 24h to the front.
-    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Quality", "Score trend", "Score label",
+    # Move Score / Δ / σ / Age / Quality / 1d / 7d / Score-trend / Signal / Dev / Funding / Liq trend / Liq 24h to the front.
+    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Quality", "1d %", "7d %",
+             "Score trend", "Score label",
              "Signal", "Dev", "Dev z", "Funding", "Liq trend", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
@@ -405,6 +412,26 @@ if not df.empty:
                 "  1-6h  → developing\n"
                 "  > 12h → mature, late-cycle\n\n"
                 "Empty for neutral rows or new history (< 2 samples)."
+            ),
+        ),
+        "1d %": st.column_config.NumberColumn(
+            "1d %",
+            format="%+.2f%%",
+            help=(
+                "Close-to-close return over the last 24h, from cached daily "
+                "klines. **Cross-reference with Score:**\n\n"
+                "  • High score + small 1d % → signal still ahead of price (actionable)\n"
+                "  • High score + large 1d % → setup likely already played out\n"
+                "  • Negative score + negative 1d % → bearish thesis confirming"
+            ),
+        ),
+        "7d %": st.column_config.NumberColumn(
+            "7d %",
+            format="%+.2f%%",
+            help=(
+                "Close-to-close return over the last 7 days. Wider context "
+                "than 1d %; flags pairs already in a multi-day move where "
+                "fresh signal entry may be late."
             ),
         ),
         "Score label": st.column_config.TextColumn(

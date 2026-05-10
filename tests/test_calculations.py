@@ -224,6 +224,77 @@ def test_combined_high_funding_liq_net_chart_empty_when_no_histogram_arg():
     assert out[0].liq_net_hourly_chart == []
 
 
+# ---------------- Round 44: pct_1d / pct_7d ----------------
+
+
+def test_combined_high_funding_pct_1d_computed_from_klines():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    # Klines oldest → newest: yesterday close = 100, today close = 110 → +10%.
+    klines = {
+        "BTCUSDT": [
+            _kline(close=100.0, days_ago=1),
+            _kline(close=110.0, days_ago=0),
+        ],
+    }
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        klines_by_symbol=klines,
+    )
+    assert out[0].pct_1d == pytest.approx(10.0)
+
+
+def test_combined_high_funding_pct_7d_computed_from_klines():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    # Need 8 daily bars: index -8 is the close 7 days ago.
+    klines_list = [_kline(close=100.0 + i, days_ago=7 - i) for i in range(8)]
+    # close at index -8 is 100, close at index -1 is 107 → +7%
+    klines = {"BTCUSDT": klines_list}
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        klines_by_symbol=klines,
+    )
+    assert out[0].pct_7d == pytest.approx(7.0)
+
+
+def test_combined_high_funding_pct_none_when_insufficient_klines():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        klines_by_symbol={"BTCUSDT": [_kline(close=100.0, days_ago=0)]},
+    )
+    assert out[0].pct_1d is None
+    assert out[0].pct_7d is None
+
+
+def test_combined_high_funding_pct_none_when_no_klines():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+    )
+    assert out[0].pct_1d is None
+    assert out[0].pct_7d is None
+
+
+def test_combined_high_funding_pct_handles_negative_returns():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    klines = {
+        "BTCUSDT": [
+            _kline(close=100.0, days_ago=1),
+            _kline(close=80.0, days_ago=0),
+        ],
+    }
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        klines_by_symbol=klines,
+    )
+    assert out[0].pct_1d == pytest.approx(-20.0)
+
+
 def test_combined_high_funding_only_one_side():
     """Base only on Binance: still flagged if Binance rate > threshold."""
     bnb = [_funding("Binance", "FOOUSDT", "FOO", "USDT", rate=2.5)]

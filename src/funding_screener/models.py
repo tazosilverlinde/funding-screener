@@ -172,6 +172,11 @@ class CombinedFundingRow(_Frozen):
     # into a single bucket so users prioritize without cross-referencing 4 cols.
     # Examples: "🚀 Fresh bull", "📈 Building bear", "⏰ Late bull", "⚠️ Noisy".
     setup_quality_label: Optional[str] = None
+    # Recent close-to-close price returns (Round 44) — pulled from cached daily
+    # klines. Helps contextualize a high-score row: signal still ahead of price
+    # (low pct_1d) is more actionable than signal that's already moved (high pct_1d).
+    pct_1d: Optional[float] = None
+    pct_7d: Optional[float] = None
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.
