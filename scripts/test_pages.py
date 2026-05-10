@@ -29,6 +29,7 @@ PAGES = [
     "pages/5_Symbol_Detail.py",
     "pages/6_Whale_Flows.py",
     "pages/7_Token_Unlocks.py",
+    "pages/8_Liquidations.py",
 ]
 
 

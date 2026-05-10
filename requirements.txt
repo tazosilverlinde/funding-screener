@@ -6,3 +6,5 @@ pydantic>=2.6
 pyyaml>=6.0
 pytest>=8.0
 rich>=13.7
+# Liquidation-tape WebSocket consumer (Binance forceOrder stream).
+websockets>=12.0

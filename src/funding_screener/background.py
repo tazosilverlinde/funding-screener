@@ -38,6 +38,7 @@ from .notifications import (
     evaluate_whale_flow_alerts,
     load_alerts_config,
 )
+from .liquidations import LiquidationsBuffer, consume_binance_liquidations
 from .onchain import (
     EthOnchainClient,
     EvmOnchainClient,
@@ -89,6 +90,11 @@ class DataStore:
         self.score_history: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
         # Per-loop cycle durations in seconds (last 50). Drives the perf expander.
         self.loop_timings: dict[str, list[float]] = {}
+        # 24h rolling buffer of liquidation events from the Binance forceOrder
+        # WebSocket stream. Owns its own asyncio.Lock; safe to call aggregate_*
+        # from any thread because the underlying deques only mutate via the WS
+        # task (single producer) and reads run during page render.
+        self.liquidations = LiquidationsBuffer()
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -254,6 +260,25 @@ class DataStore:
     def record_error(self, msg: str) -> None:
         with self._lock:
             self.last_error = msg
+
+    def read_liquidations(self, symbol: str | None = None, window_seconds: int | None = None) -> dict:
+        """Snapshot of the liquidations buffer.
+
+        - With `symbol`: returns per-symbol stats dict for that symbol only.
+        - Without: returns {symbol: stats} for every symbol with events.
+        """
+        if symbol:
+            return self.liquidations.aggregate(symbol, window_seconds=window_seconds)
+        return self.liquidations.aggregate_all(window_seconds=window_seconds)
+
+    def liquidations_health(self) -> dict:
+        """Summary used in the perf expander / sidebar — surfaces whether the
+        WS is live and how many events we've ingested since startup.
+        """
+        return {
+            "total_events": self.liquidations.total_events_seen(),
+            "last_event_at": self.liquidations.last_event_at(),
+        }
 
     # ---- readers (thread-safe; called from Streamlit page renders) ----
 
@@ -992,6 +1017,10 @@ def _runner() -> None:
         loop.create_task(_macro_flow_loop(_store, eth_chain))
         loop.create_task(_score_history_loop(_store))
         loop.create_task(_alerts_loop(_store, telegram))
+        # Liquidation tape — long-running WebSocket consumer. The task auto-
+        # reconnects with exponential backoff on any drop, so spawning it once
+        # is enough; nothing here observes its return value.
+        loop.create_task(consume_binance_liquidations(_store.liquidations))
         loop.run_forever()
     finally:
         try:
