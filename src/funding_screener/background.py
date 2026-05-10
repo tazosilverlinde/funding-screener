@@ -26,8 +26,14 @@ from .exchanges.mexc import MexcClient
 from .macro import DefiLlamaClient
 from .market_data import CoinPaprikaClient
 from .models import ContractInfo, EnrichmentData, FundingRow, Kline
+from .digest import (
+    compose_daily_digest,
+    format_digest_as_html,
+    format_digest_as_text,
+)
 from .notifications import (
     AlertState,
+    EmailClient,
     TelegramClient,
     evaluate_composite_alerts,
     evaluate_funding_alerts,
@@ -40,6 +46,8 @@ from .notifications import (
     evaluate_whale_flow_alerts,
     load_alerts_config,
 )
+from .sectors import sector_aggregates as _sector_aggregates
+from .unlocks import load_upcoming_unlocks as _load_upcoming_unlocks
 from .liquidations import LiquidationsBuffer, consume_binance_liquidations
 from .onchain import (
     EthOnchainClient,
@@ -1014,6 +1022,99 @@ def _describe_errors(errs: list) -> str:
     return " | ".join(out)
 
 
+async def _daily_digest_loop(
+    store: DataStore, telegram: TelegramClient, email: EmailClient,
+) -> None:
+    """Once-a-day digest sender (Round 22).
+
+    Wakes every 60 seconds, checks if it's the configured firing hour AND
+    we haven't already fired today. State (last_sent_date) is in-memory so a
+    restart in the firing hour can re-send once — acceptable since users
+    expect one digest per day, not zero.
+
+    Reads `digest:` from settings (not alerts) — digest is a different
+    delivery semantic from per-event alerts (summary vs push), warrants its
+    own config block. Defaults: enabled=true, hour_utc=8, top_n=5.
+
+    Sends to BOTH Telegram and Email if each is configured. Skipped silently
+    when neither is.
+    """
+    last_sent_date: Optional[str] = None
+    while True:
+        try:
+            cfg = (settings() or {}).get("digest") or {}
+            if not cfg.get("enabled", True):
+                await asyncio.sleep(60)
+                continue
+            hour_utc = int(cfg.get("hour_utc", 8))
+            top_n = int(cfg.get("top_n", 5))
+
+            now_utc = datetime.now(timezone.utc)
+            today_str = now_utc.date().isoformat()
+            if now_utc.hour != hour_utc or last_sent_date == today_str:
+                await asyncio.sleep(60)
+                continue
+
+            # Compose digest from current store state.
+            bnb = store.read_binance()
+            mxc = store.read_mexc()
+            enrichments = store.read_enrichments()
+            onchain_flows, _ = store.read_onchain_flows()
+            onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
+            score_histories = store.read_score_histories()
+            liq_stats = store.read_liquidations(window_seconds=24 * 3600)
+            combined_klines: dict = {}
+            combined_klines.update(bnb.klines)
+            combined_klines.update(mxc.klines)
+            combined_rows = screen_combined_high_funding(
+                bnb.funding, mxc.funding,
+                bnb.contracts, mxc.contracts,
+                enrichments,
+                threshold_percent=0.0,
+                binance_volumes=bnb.volumes, mexc_volumes=mxc.volumes,
+                min_volume_usd_per_side=0.0,
+                onchain_netflow_by_base=onchain_by_base,
+                klines_by_symbol=combined_klines,
+                score_histories=score_histories,
+                liq_stats_by_symbol=liq_stats,
+            )
+            sector_rows = _sector_aggregates(combined_rows)
+            digest = compose_daily_digest(
+                combined_rows=combined_rows,
+                liq_stats_by_symbol=liq_stats,
+                onchain_flows=onchain_flows,
+                unlock_events=_load_upcoming_unlocks(),
+                stablecoin_supply=store.read_stablecoin_supply(),
+                sector_rows=sector_rows,
+                top_n=top_n,
+            )
+            text_body = format_digest_as_text(digest, top_n=top_n)
+            html_body = format_digest_as_html(digest, top_n=top_n)
+            subject = f"funding_screener daily digest — {today_str}"
+
+            # Fire-and-update — only mark date if at least one channel was
+            # configured. If neither is, we don't burn the day.
+            sent_anywhere = False
+            if telegram.is_configured():
+                # Telegram has a 4096-char message limit; truncate text just
+                # in case (digest should fit comfortably).
+                tg_text = text_body[:3900]
+                ok = await telegram.send(tg_text)
+                if ok:
+                    sent_anywhere = True
+            if email.is_configured():
+                ok = await email.send_message(subject, text_body, html_body)
+                if ok:
+                    sent_anywhere = True
+            if sent_anywhere:
+                last_sent_date = today_str
+                log.info("daily digest sent for %s", today_str)
+        except Exception as e:
+            log.exception("digest loop error")
+            store.record_error(f"digest: {type(e).__name__}: {e}")
+        await asyncio.sleep(60)
+
+
 def _runner() -> None:
     """Entry-point for the daemon thread. Owns its own event loop and clients."""
     loop = asyncio.new_event_loop()
@@ -1030,6 +1131,7 @@ def _runner() -> None:
     }
     eth_chain = chain_clients["ethereum"]
     telegram = TelegramClient()
+    email = EmailClient()
     _runner_state["binance"] = binance
     _runner_state["mexc"] = mexc
     try:
@@ -1050,13 +1152,15 @@ def _runner() -> None:
         # reconnects with exponential backoff on any drop, so spawning it once
         # is enough; nothing here observes its return value.
         loop.create_task(consume_binance_liquidations(_store.liquidations))
+        # Daily digest delivery (Telegram + email, sends only at hour_utc).
+        loop.create_task(_daily_digest_loop(_store, telegram, email))
         loop.run_forever()
     finally:
         try:
             close_calls = [
                 binance.aclose(), mexc.aclose(),
                 mcap_client.aclose(), llama.aclose(),
-                telegram.aclose(),
+                telegram.aclose(), email.aclose(),
             ]
             close_calls.extend(c.aclose() for c in chain_clients.values())
             loop.run_until_complete(

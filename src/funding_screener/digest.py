@@ -196,3 +196,229 @@ def compose_daily_digest(
         digest["sector_winners"] = winners
         digest["sector_losers"] = losers
     return digest
+
+
+# ----------------------------------------------------------------------
+# Output formatters — both reuse the same digest dict so format never
+# drifts between Telegram and email. Markdown for Telegram (which renders
+# a subset), HTML for email (renders everywhere).
+# ----------------------------------------------------------------------
+
+
+def _fmt_dollars(v: float | None) -> str:
+    if v is None:
+        return "—"
+    if abs(v) >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if abs(v) >= 1e6:
+        return f"${v / 1e6:.1f}M"
+    if abs(v) >= 1e3:
+        return f"${v / 1e3:.0f}K"
+    return f"${v:.0f}"
+
+
+def format_digest_as_text(digest: dict, top_n: int = 5) -> str:
+    """Plain-text digest — used as Telegram message body and email text part.
+
+    Keep lines short and avoid markdown that doesn't render the same in both
+    targets (Telegram uses MarkdownV2 escaping, email plain-text doesn't).
+    """
+    lines: list[str] = []
+    ov = digest.get("market_overview") or {}
+    lines.append(f"Daily market digest — {ov.get('total_symbols', 0)} symbols tracked")
+    lines.append(
+        f"  Bullish: {ov.get('bullish', 0)}  "
+        f"({ov.get('strong_bull', 0)} strong)  |  "
+        f"Bearish: {ov.get('bearish', 0)} "
+        f"({ov.get('strong_bear', 0)} strong)  |  "
+        f"Neutral: {ov.get('neutral', 0)}"
+    )
+
+    if digest.get("macro"):
+        m = digest["macro"]
+        lines.append("")
+        lines.append(f"Macro: {m.get('emoji', '')} {m.get('headline', '')}")
+
+    if digest.get("top_longs"):
+        lines.append("")
+        lines.append("Top long candidates:")
+        for r in digest["top_longs"][:top_n]:
+            f = r.get("funding_8h_pct")
+            f_str = f"{f:+.4f}%/8h" if f is not None else "—"
+            lines.append(f"  {r['symbol']:<14} score {r['score']:+d}  funding {f_str}")
+
+    if digest.get("top_shorts"):
+        lines.append("")
+        lines.append("Top short candidates:")
+        for r in digest["top_shorts"][:top_n]:
+            f = r.get("funding_8h_pct")
+            f_str = f"{f:+.4f}%/8h" if f is not None else "—"
+            lines.append(f"  {r['symbol']:<14} score {r['score']:+d}  funding {f_str}")
+
+    if digest.get("top_squeezes"):
+        lines.append("")
+        lines.append("Top short squeezes (24h liq):")
+        for r in digest["top_squeezes"][:top_n]:
+            lines.append(f"  {r['symbol']:<14} {_fmt_dollars(r['side_usd'])}")
+
+    if digest.get("top_cascades"):
+        lines.append("")
+        lines.append("Top long cascades (24h liq):")
+        for r in digest["top_cascades"][:top_n]:
+            lines.append(f"  {r['symbol']:<14} {_fmt_dollars(r['side_usd'])}")
+
+    if digest.get("whale_highlight"):
+        w = digest["whale_highlight"]
+        lines.append("")
+        lines.append(f"Whale spotlight: {w.get('emoji', '')} {w.get('headline', '')}")
+
+    if digest.get("upcoming_unlocks"):
+        lines.append("")
+        lines.append("Upcoming unlocks (next 7 days):")
+        for u in digest["upcoming_unlocks"][:top_n]:
+            amt = _fmt_dollars(u.get("amount_usd"))
+            lines.append(
+                f"  {u['symbol']:<10} {u.get('date_str', ''):<11} {amt} "
+                f"({u.get('pct_of_supply', 0):.2f}% supply)"
+            )
+
+    if digest.get("sector_winners") or digest.get("sector_losers"):
+        lines.append("")
+        if digest.get("sector_winners"):
+            winners = ", ".join(
+                f"{s['sector']} ({s.get('avg_score', 0):+.0f})"
+                for s in digest["sector_winners"]
+            )
+            lines.append(f"Sector winners: {winners}")
+        if digest.get("sector_losers"):
+            losers = ", ".join(
+                f"{s['sector']} ({s.get('avg_score', 0):+.0f})"
+                for s in digest["sector_losers"]
+            )
+            lines.append(f"Sector laggards: {losers}")
+
+    return "\n".join(lines)
+
+
+def _html_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Inline-styled HTML table — survives email-client CSS stripping."""
+    style_th = "padding:6px 10px;border-bottom:2px solid #ccc;text-align:left;background:#f7f7f7;"
+    style_td = "padding:6px 10px;border-bottom:1px solid #eee;"
+    head = "".join(f'<th style="{style_th}">{h}</th>' for h in headers)
+    body = "".join(
+        "<tr>" + "".join(f'<td style="{style_td}">{c}</td>' for c in row) + "</tr>"
+        for row in rows
+    )
+    return (
+        '<table style="border-collapse:collapse;font-family:sans-serif;font-size:13px;'
+        'min-width:300px;margin-bottom:12px;">'
+        f"<thead><tr>{head}</tr></thead>"
+        f"<tbody>{body}</tbody>"
+        "</table>"
+    )
+
+
+def format_digest_as_html(digest: dict, top_n: int = 5) -> str:
+    """Email-friendly HTML — inline styles only (Gmail/Outlook strip <style>)."""
+    parts: list[str] = []
+    parts.append(
+        '<div style="font-family:sans-serif;font-size:14px;line-height:1.5;'
+        'max-width:780px;color:#222;">'
+    )
+    parts.append('<h2 style="margin-bottom:6px;">Daily market digest</h2>')
+
+    ov = digest.get("market_overview") or {}
+    parts.append(
+        f'<p style="margin-top:0;color:#555;">'
+        f"{ov.get('total_symbols', 0)} symbols tracked &mdash; "
+        f"<b style='color:#2ca02c;'>{ov.get('bullish', 0)}</b> bullish "
+        f"({ov.get('strong_bull', 0)} strong), "
+        f"<b style='color:#d62728;'>{ov.get('bearish', 0)}</b> bearish "
+        f"({ov.get('strong_bear', 0)} strong), "
+        f"<b>{ov.get('neutral', 0)}</b> neutral."
+        f"</p>"
+    )
+
+    if digest.get("macro"):
+        m = digest["macro"]
+        parts.append(
+            f'<p><b>Macro:</b> {m.get("emoji", "")} {m.get("headline", "")}</p>'
+        )
+
+    def _funding_str(v: float | None) -> str:
+        return f"{v:+.4f}%" if v is not None else "—"
+
+    if digest.get("top_longs"):
+        parts.append("<h3>🟢 Top long candidates</h3>")
+        rows = [
+            [r["symbol"], f"{r['score']:+d}", r.get("label", ""), _funding_str(r.get("funding_8h_pct"))]
+            for r in digest["top_longs"][:top_n]
+        ]
+        parts.append(_html_table(["Symbol", "Score", "Bias", "Funding/8h"], rows))
+
+    if digest.get("top_shorts"):
+        parts.append("<h3>🔴 Top short candidates</h3>")
+        rows = [
+            [r["symbol"], f"{r['score']:+d}", r.get("label", ""), _funding_str(r.get("funding_8h_pct"))]
+            for r in digest["top_shorts"][:top_n]
+        ]
+        parts.append(_html_table(["Symbol", "Score", "Bias", "Funding/8h"], rows))
+
+    if digest.get("top_squeezes"):
+        parts.append("<h3>🟢 Top short squeezes (24h)</h3>")
+        rows = [
+            [r["symbol"], _fmt_dollars(r["side_usd"]), _fmt_dollars(r["other_usd"]), str(r.get("events_count", 0))]
+            for r in digest["top_squeezes"][:top_n]
+        ]
+        parts.append(_html_table(["Symbol", "Short liq", "Long liq", "Events"], rows))
+
+    if digest.get("top_cascades"):
+        parts.append("<h3>🔴 Top long cascades (24h)</h3>")
+        rows = [
+            [r["symbol"], _fmt_dollars(r["side_usd"]), _fmt_dollars(r["other_usd"]), str(r.get("events_count", 0))]
+            for r in digest["top_cascades"][:top_n]
+        ]
+        parts.append(_html_table(["Symbol", "Long liq", "Short liq", "Events"], rows))
+
+    if digest.get("whale_highlight"):
+        w = digest["whale_highlight"]
+        parts.append(
+            f'<p><b>🐋 Whale spotlight:</b> {w.get("emoji", "")} {w.get("headline", "")}</p>'
+        )
+
+    if digest.get("upcoming_unlocks"):
+        parts.append("<h3>🔓 Upcoming unlocks (next 7 days)</h3>")
+        rows = [
+            [
+                u["symbol"], u.get("date_str", ""), str(u.get("days_until", "")),
+                _fmt_dollars(u.get("amount_usd")), f"{u.get('pct_of_supply', 0):.2f}%",
+            ]
+            for u in digest["upcoming_unlocks"][:top_n]
+        ]
+        parts.append(_html_table(["Symbol", "Date", "Days", "Amount", "% supply"], rows))
+
+    if digest.get("sector_winners") or digest.get("sector_losers"):
+        parts.append("<h3>🏆 Sector rotation</h3>")
+        if digest.get("sector_winners"):
+            winners = ", ".join(
+                f"{s['sector']} ({s.get('avg_score', 0):+.0f})"
+                for s in digest["sector_winners"]
+            )
+            parts.append(f"<p><b>Winners:</b> {winners}</p>")
+        if digest.get("sector_losers"):
+            losers = ", ".join(
+                f"{s['sector']} ({s.get('avg_score', 0):+.0f})"
+                for s in digest["sector_losers"]
+            )
+            parts.append(f"<p><b>Laggards:</b> {losers}</p>")
+
+    parts.append(
+        '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">'
+        '<p style="color:#888;font-size:12px;">'
+        "Generated by funding_screener. To opt out, unset the EMAIL_TO env "
+        "var on the deployment."
+        "</p>"
+        "</div>"
+    )
+    return "".join(parts)
+

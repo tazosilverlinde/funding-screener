@@ -51,3 +51,19 @@ http:
   # on the multi-symbol enrichment loop.
   max_connections: 20
   max_keepalive_connections: 10
+
+# Daily digest — composed once a day and delivered via Telegram + email.
+# See Page 9 ("Daily digest") for a live preview of the content.
+#
+# To enable email delivery, set env vars (Render → Environment, or your
+# hosting equivalent). Telegram uses TELEGRAM_BOT_TOKEN/CHAT_ID as before.
+#   SMTP_HOST       e.g. "smtp.gmail.com"
+#   SMTP_PORT       587 (STARTTLS) or 465 (SSL); default 587
+#   SMTP_USER       SMTP auth username
+#   SMTP_PASSWORD   app password (Gmail) or regular password
+#   EMAIL_FROM      "From" header (defaults to SMTP_USER if blank)
+#   EMAIL_TO        recipient email
+digest:
+  enabled: true
+  hour_utc: 8           # firing hour, 0..23 UTC. Default 8 = early-morning EU.
+  top_n: 5              # rows per ranked section

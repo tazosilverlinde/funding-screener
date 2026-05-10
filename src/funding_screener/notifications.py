@@ -1,11 +1,16 @@
-"""Telegram alerts.
+"""Telegram alerts + email digest delivery.
 
-Free Telegram Bot API: requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars.
-Setup is documented in `config/alerts.yaml`.
+Telegram (per-event push):
+    Free Telegram Bot API: requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars.
+    Setup is documented in `config/alerts.yaml`.
+    Each alert key is `(alert_type, symbol)`. State is in-memory; we only fire on
+    transitions (off→on or on→off) and respect a per-key cooldown so oscillating
+    metrics don't spam.
 
-Each alert key is `(alert_type, symbol)`. State is in-memory; we only fire on
-transitions (off→on or on→off) and respect a per-key cooldown so oscillating
-metrics don't spam.
+Email (daily digest, Round 22):
+    Standard SMTP via stdlib smtplib. Requires SMTP_HOST, SMTP_PORT, SMTP_USER,
+    SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO env vars. STARTTLS-style (port 587).
+    Used only by the once-a-day digest loop, not per-event alerts.
 """
 
 from __future__ import annotations
@@ -13,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import smtplib
 import time
 from dataclasses import dataclass, field
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional
 
@@ -101,6 +108,79 @@ class TelegramClient:
         except Exception as exc:
             _log.warning("Telegram send exception: %s", exc)
             return False
+
+
+class EmailClient:
+    """SMTP client for the daily digest. Stdlib smtplib — no extra deps.
+
+    Reads config from env vars at construction time:
+        SMTP_HOST       e.g. "smtp.gmail.com"
+        SMTP_PORT       e.g. "587" (STARTTLS) or "465" (SSL); defaults to 587
+        SMTP_USER       SMTP auth username
+        SMTP_PASSWORD   SMTP auth password (use an app password for Gmail)
+        EMAIL_FROM      "From" header; defaults to SMTP_USER
+        EMAIL_TO        recipient address (single, comma-separated for many)
+
+    Constructing without env vars is safe — `is_configured()` returns False
+    and `send_message()` becomes a no-op. That keeps this safe for users who
+    only configured Telegram.
+    """
+
+    name = "Email"
+
+    def __init__(self) -> None:
+        self._host = os.getenv("SMTP_HOST", "").strip()
+        try:
+            self._port = int(os.getenv("SMTP_PORT", "587").strip() or 587)
+        except ValueError:
+            self._port = 587
+        self._user = os.getenv("SMTP_USER", "").strip()
+        self._password = os.getenv("SMTP_PASSWORD", "").strip()
+        self._email_from = (os.getenv("EMAIL_FROM", "") or self._user).strip()
+        self._email_to = os.getenv("EMAIL_TO", "").strip()
+
+    def is_configured(self) -> bool:
+        return bool(
+            self._host and self._user and self._password and self._email_to
+        )
+
+    async def aclose(self) -> None:
+        # Nothing to clean up — smtplib connections are per-call and short-lived.
+        return None
+
+    def _send_sync(self, subject: str, text_body: str, html_body: str) -> bool:
+        """Blocking SMTP send. Run via asyncio.to_thread from the event loop."""
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = self._email_from
+        msg["To"] = self._email_to
+        msg.set_content(text_body)
+        msg.add_alternative(html_body, subtype="html")
+        try:
+            if self._port == 465:
+                # Implicit TLS variant.
+                with smtplib.SMTP_SSL(self._host, self._port, timeout=30) as smtp:
+                    smtp.login(self._user, self._password)
+                    smtp.send_message(msg)
+            else:
+                with smtplib.SMTP(self._host, self._port, timeout=30) as smtp:
+                    smtp.starttls()
+                    smtp.login(self._user, self._password)
+                    smtp.send_message(msg)
+            return True
+        except Exception as exc:
+            _log.warning("Email send failed: %s", exc)
+            return False
+
+    async def send_message(
+        self, subject: str, text_body: str, html_body: str,
+    ) -> bool:
+        """Returns True on success or quiet-skip; False on SMTP error."""
+        if not self.is_configured():
+            return True  # silently skipped
+        return await asyncio.to_thread(
+            self._send_sync, subject, text_body, html_body,
+        )
 
 
 # ---------------- alert evaluators ----------------
