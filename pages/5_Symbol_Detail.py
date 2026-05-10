@@ -38,6 +38,7 @@ from funding_screener.signals import (  # noqa: E402
     compute_funding_deviation,
     estimate_funding_income,
 )
+from funding_screener.thesis import compose_trade_thesis  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
@@ -243,6 +244,55 @@ else:
 with st.expander(f"Composite score breakdown ({composite.score:+d} {composite.emoji} {composite.short})"):
     for line in composite.breakdown:
         st.write(f"• {line}")
+
+# ── Auto-generated trade thesis (Round 37) ─────────────────────────────────
+# Synthesizes all available signals into a structured English summary so the
+# user gets a bullish-reasons / bearish-reasons / risks breakdown without
+# having to mentally combine the 12+ columns from Page 2.
+_thesis_funding_dev = compute_funding_deviation(
+    funding_row.rate_percent if funding_row else None,
+    enrichment.prev_funding_rates_percent if enrichment else [],
+)
+_thesis_liq = liq_stats if 'liq_stats' in dir() and liq_stats else store.read_liquidations(
+    symbol=symbol_q, window_seconds=24 * 3600,
+)
+thesis = compose_trade_thesis(
+    symbol=symbol_q,
+    composite_score=composite.score,
+    funding_8h_norm_pct=funding_row.rate_8h_norm_percent if funding_row else None,
+    funding_streak_count=enrichment.funding_streak_count if enrichment else 0,
+    funding_streak_direction=enrichment.funding_streak_direction if enrichment else None,
+    funding_deviation_z=_thesis_funding_dev.z_score if _thesis_funding_dev else None,
+    mark_index_spread_pct=enrichment.mark_index_spread_percent if enrichment else None,
+    oi_change_24h_pct=enrichment.oi_change_24h_pct if enrichment else None,
+    ls_ratio_global=enrichment.ls_ratio_global if enrichment else None,
+    ls_ratio_top=enrichment.ls_ratio_top if enrichment else None,
+    onchain_net_usd=onchain_net,
+    liq_long_usd_24h=_thesis_liq.get("long_liq_usd") if _thesis_liq else None,
+    liq_short_usd_24h=_thesis_liq.get("short_liq_usd") if _thesis_liq else None,
+)
+with st.expander(f"📝 Auto-thesis — {thesis['headline']}", expanded=False):
+    if thesis["bullish_reasons"]:
+        st.markdown("**🟢 Bullish reasons:**")
+        for r in thesis["bullish_reasons"]:
+            st.markdown(f"- {r}")
+    if thesis["bearish_reasons"]:
+        st.markdown("**🔴 Bearish reasons:**")
+        for r in thesis["bearish_reasons"]:
+            st.markdown(f"- {r}")
+    if thesis["risks"]:
+        st.markdown("**⚠️ Risks:**")
+        for r in thesis["risks"]:
+            st.markdown(f"- {r}")
+    if not (thesis["bullish_reasons"] or thesis["bearish_reasons"] or thesis["risks"]):
+        st.caption(
+            "Not enough data attached to this symbol to form a thesis yet. "
+            "Wait for the enrichment loop to populate (~3 min after deploy)."
+        )
+    st.caption(
+        "Auto-generated from current signal values. Each line maps to one "
+        "section above — this expander is purely a consolidation."
+    )
 
 # ── Score history chart (Round 26) ─────────────────────────────────────────
 # Shows how the composite score has evolved for this pair over the last 24h.
