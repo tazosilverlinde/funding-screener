@@ -316,33 +316,49 @@ else:
 st.divider()
 st.subheader("Macro flows — last 7 days, daily")
 st.caption(
-    "Net flow per day for stablecoins (USDT, USDC) + BTC (via WBTC) + ETH (via WETH). "
-    "Positive bars = withdrawals exceeded deposits (off-exchange accumulation). "
-    "Negative bars = deposits exceeded withdrawals (likely sell-side flow)."
+    "Net flow per day for stables + BTC + ETH on each chain. **Ethereum** "
+    "tracks USDT/USDC/WBTC/WETH; **BNB Chain** tracks Binance-Peg variants "
+    "(USDT/USDC/BTCB/ETH). Positive bars = withdrawals exceeded deposits "
+    "(off-exchange accumulation); negative = deposits exceeded withdrawals."
 )
 
-macro_flows, macro_at = store.read_macro_daily_flows()
-if not macro_flows:
+# Per-chain rendering — Round 29 made macro flows multi-chain.
+_macro_by_chain = store.read_macro_daily_flows_by_chain()
+if not _macro_by_chain:
     st.info(
-        "First 7-day macro-flow scan in progress. Refresh in a few minutes — "
-        "this loop runs every 6 hours and the first scan after deploy takes 1-3 minutes."
+        "First 7-day macro-flow scan in progress on both chains. Refresh in a "
+        "few minutes — this loop runs every 6 hours per chain, first scan "
+        "after deploy takes 1-3 minutes per chain."
     )
-else:
+
+_CHAIN_LABELS = {"ethereum": "Ethereum", "bsc": "BNB Chain"}
+_TOKENS_BY_CHAIN_DISPLAY = {
+    "ethereum": ["USDT", "USDC", "WBTC", "WETH"],
+    "bsc": ["USDT", "USDC", "BTCB", "ETH"],
+}
+for chain_name, (macro_flows, macro_at) in sorted(_macro_by_chain.items()):
+    if not macro_flows:
+        continue
+    label = _CHAIN_LABELS.get(chain_name, chain_name.title())
+    st.markdown(f"### {label}")
+    expected_tokens = _TOKENS_BY_CHAIN_DISPLAY.get(chain_name, list(macro_flows.keys()))
     macro_cols = st.columns(min(4, len(macro_flows)))
-    for i, sym in enumerate(["USDT", "USDC", "WBTC", "WETH"]):
+    col_idx = 0
+    for sym in expected_tokens:
         if sym not in macro_flows:
             continue
-        col = macro_cols[i % len(macro_cols)]
+        col = macro_cols[col_idx % len(macro_cols)]
         rows = macro_flows[sym]
         net_total_7d = sum(r["net_usd"] for r in rows)
         col.metric(
             f"{sym} 7d net",
             f"${net_total_7d / 1e6:+,.1f}M",
-            help=f"Sum of net flow for {sym} over the 7-day window. "
+            help=f"Sum of net flow for {sym} on {label} over the 7-day window. "
                  f"Positive = net withdrawals (bullish bias for the asset).",
         )
+        col_idx += 1
 
-    # Build a stacked bar chart.
+    # Per-chain stacked bar chart.
     chart_rows: list[dict] = []
     for sym, rows in macro_flows.items():
         for r in rows:
@@ -353,16 +369,10 @@ else:
             })
     chart_df = pd.DataFrame(chart_rows)
     if not chart_df.empty:
-        # Pivot so each token is its own series for st.bar_chart.
         pivot = chart_df.pivot(index="Date", columns="Token", values="Net (USD)").fillna(0.0)
-        st.bar_chart(pivot, height=280)
-        st.caption(
-            "Bar height per day = net USD flow (withdrawals − deposits). "
-            "Stacked across the 4 macro tokens."
-        )
+        st.bar_chart(pivot, height=240)
 
-    with st.expander("Per-day breakdown table", expanded=False):
-        # Long table grouped by token.
+    with st.expander(f"{label} — per-day breakdown table", expanded=False):
         for sym, rows in macro_flows.items():
             st.markdown(f"**{sym}**")
             sym_df = pd.DataFrame(rows).rename(columns={
@@ -383,7 +393,7 @@ else:
     if macro_at:
         from datetime import datetime, timezone as _tz
         age_min = int((datetime.now(_tz.utc) - macro_at).total_seconds() / 60)
-        st.caption(f"Macro-flow scan: {age_min}m ago. Refreshes every 6 hours.")
+        st.caption(f"{label} scan: {age_min}m ago. Refreshes every 6 hours.")
 
 st.divider()
 
@@ -405,8 +415,10 @@ st.markdown(
 - **Cross-chain duplicates** — USDT, USDC, BTC etc. appear on both ETH and BSC as
   separate rows; they're not summed (different on-chain liquidity pools, different
   whale audiences). Use the Chains filter above to focus on one.
-- **Macro flows below are still ETH-only** — adding BSC to the macro chart is on the
-  roadmap but requires a separate per-chain layout (different liquidity dynamics).
+- **Macro flows now run per-chain** (Round 29) — Ethereum and BSC each get their own
+  7-day breakdown. They're shown stacked separately because they're different liquidity
+  pools (Binance-Peg BTCB on BSC isn't fungible with WBTC on ETH from a flow-tracking
+  standpoint).
 """
 )
 

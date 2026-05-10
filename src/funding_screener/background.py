@@ -93,9 +93,11 @@ class DataStore:
         # flattens to one cross-chain list — every row has a "chain" field.
         self.onchain_flows_by_chain: dict[str, list[dict]] = {}
         self.last_onchain_by_chain: dict[str, datetime] = {}
-        # 7-day daily exchange netflow for stables + BTC + ETH (USDT/USDC/WBTC/WETH).
-        # Shape: {symbol: list[{"date": ..., "deposits_usd": ..., "withdrawals_usd": ..., "net_usd": ...}]}
-        self.macro_daily_flows: dict[str, list[dict]] = {}
+        # 7-day daily exchange netflow for stables + BTC + ETH per chain.
+        # Shape: {chain_name: {symbol: list[{"date":..., "net_usd":...}]}}
+        # ETH tracks USDT/USDC/WBTC/WETH; BSC tracks USDT/USDC/BTCB/ETH (BEP-20).
+        self.macro_daily_flows_by_chain: dict[str, dict[str, list[dict]]] = {}
+        self.last_macro_flows_at_by_chain: dict[str, datetime] = {}
         # Composite-score history per (base_asset, quote_asset), trimmed to last 24h.
         # Each value is a list of (timestamp_utc, score_int) tuples in chronological order.
         self.score_history: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
@@ -121,7 +123,6 @@ class DataStore:
         self.last_market_caps_at: Optional[datetime] = None
         self.last_enrichment_at: Optional[datetime] = None
         self.last_macro_at: Optional[datetime] = None
-        self.last_macro_flows_at: Optional[datetime] = None
         self.last_score_snapshot_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self.bg_started_at: Optional[datetime] = None
@@ -209,15 +210,37 @@ class DataStore:
                 for chain, flows in self.onchain_flows_by_chain.items()
             }
 
-    def update_macro_daily_flows(self, data: dict[str, list[dict]]) -> None:
+    def update_macro_daily_flows(self, chain: str, data: dict[str, list[dict]]) -> None:
+        """Replace the chain's macro slice. Default chain is "ethereum" — when
+        callers omit it (legacy single-chain code path) we still write under
+        the ethereum key so reads stay consistent.
+        """
         with self._lock:
-            self.macro_daily_flows = data
-            self.last_macro_flows_at = datetime.now(timezone.utc)
+            self.macro_daily_flows_by_chain[chain] = {k: list(v) for k, v in data.items()}
+            self.last_macro_flows_at_by_chain[chain] = datetime.now(timezone.utc)
 
-    def read_macro_daily_flows(self) -> tuple[dict[str, list[dict]], Optional[datetime]]:
+    def read_macro_daily_flows(self, chain: str = "ethereum") -> tuple[dict[str, list[dict]], Optional[datetime]]:
+        """Returns (token_to_history, last_at) for one chain. Ethereum default
+        keeps Page 6's existing call site working without changes.
+        """
         with self._lock:
-            return ({k: list(v) for k, v in self.macro_daily_flows.items()},
-                    self.last_macro_flows_at)
+            data = self.macro_daily_flows_by_chain.get(chain) or {}
+            return ({k: list(v) for k, v in data.items()},
+                    self.last_macro_flows_at_by_chain.get(chain))
+
+    def read_macro_daily_flows_by_chain(self) -> dict[str, tuple[dict[str, list[dict]], Optional[datetime]]]:
+        """Full per-chain split: {chain: (token_to_history, last_at)}.
+
+        Used by Page 6's BSC macro section to render chains side-by-side.
+        """
+        with self._lock:
+            return {
+                chain: (
+                    {k: list(v) for k, v in data.items()},
+                    self.last_macro_flows_at_by_chain.get(chain),
+                )
+                for chain, data in self.macro_daily_flows_by_chain.items()
+            }
 
     def snapshot_scores(self, scores_by_key: dict[tuple[str, str], int]) -> None:
         """Append a (now, score) entry per (base, quote) and trim to 24h."""
@@ -723,22 +746,43 @@ async def _score_history_loop(store: DataStore) -> None:
         await asyncio.sleep(interval)
 
 
-async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
+_MACRO_TOKENS_BY_CHAIN: dict[str, list[str]] = {
+    # ETH side: USDT/USDC + WBTC (BTC proxy) + WETH (ETH itself doesn't fire
+    # ERC-20 Transfer; WETH is the wrapped form most CEXs use).
+    "ethereum": ["USDT", "USDC", "WBTC", "WETH"],
+    # BSC side: USDT/USDC (Binance-Peg) + BTCB (BTC proxy) + ETH (Binance-Peg
+    # BEP-20 wrapper). All four are 18-decimals on BSC vs 6/8/18 on ETH —
+    # the contract loader handles that automatically.
+    "bsc": ["USDT", "USDC", "BTCB", "ETH"],
+}
+
+
+async def _macro_flow_loop(store: DataStore, client: EvmOnchainClient) -> None:
     """7-day daily exchange flows for stables + BTC + ETH — every 6 hours.
 
-    Tokens: USDT, USDC, WBTC (BTC proxy), WETH (ETH proxy).
-    32 RPC calls per cycle (4 tokens × 7 days × 2 dirs ÷ pacing). Sequential to
-    avoid hammering free public RPCs.
+    Multi-chain (Round 29): one task per chain. Each chain has its own token
+    list (mainnet vs Binance-Peg variants) and its own RPC client. Result
+    keyed by chain in DataStore so Page 6 can render them side-by-side.
+
+    32-40 RPC calls per cycle (4 tokens × 7 days × 2 dirs ÷ pacing). Sequential
+    inside the loop to avoid hammering free public RPCs.
     """
+    chain = client.chain
+    chain_name = chain.name
+    timing_key = f"macro_flow.{chain_name}"
     interval = 6 * 3600  # 6h
-    macro_tokens = ["USDT", "USDC", "WBTC", "WETH"]
-    exchange_wallets = load_exchange_wallets()
-    contracts = load_eth_token_contracts()
+
+    macro_tokens = _MACRO_TOKENS_BY_CHAIN.get(chain_name)
+    if not macro_tokens:
+        log.warning("Macro flow loop disabled for %s — no token list defined", chain_name)
+        return
+    exchange_wallets = load_exchange_wallets(chain_name)
+    contracts = load_eth_token_contracts(chain_name)
     if not exchange_wallets or not contracts:
-        log.warning("Macro flow loop disabled — wallet or token YAML missing")
+        log.warning("Macro flow loop disabled for %s — wallet or token YAML missing", chain_name)
         return
 
-    # Wait until fast loop has prices.
+    # Wait until fast loop has prices (we need them for USD conversion).
     while True:
         bnb = store.read_binance()
         if bnb.funding:
@@ -758,12 +802,13 @@ async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> No
             for r in mxc.funding:
                 if r.quote_asset == "USDT" and r.mark_price:
                     price_map.setdefault(r.base_asset.upper(), r.mark_price)
-            # Stables ≈ 1.0; WETH gets BTC=...wait, ETH price.
+            # Stables ≈ $1; pegged proxies follow their underlying asset.
             price_map.setdefault("USDT", 1.0)
             price_map.setdefault("USDC", 1.0)
-            # WBTC tracks BTC, WETH tracks ETH.
-            price_map.setdefault("WBTC", price_map.get("BTC", 0.0))
-            price_map.setdefault("WETH", price_map.get("ETH", 0.0))
+            price_map.setdefault("WBTC", price_map.get("BTC", 0.0))   # ETH chain
+            price_map.setdefault("WETH", price_map.get("ETH", 0.0))   # ETH chain
+            price_map.setdefault("BTCB", price_map.get("BTC", 0.0))   # BSC chain
+            # ETH-on-BSC uses the same "ETH" key as native ETH price — already populated.
 
             macro: dict[str, list[dict]] = {}
             for sym in macro_tokens:
@@ -774,18 +819,18 @@ async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> No
                 if price is None or price <= 0:
                     continue
                 history = await compute_daily_netflow_history(
-                    eth_client, token, exchange_wallets, days=7, price_usd=price,
+                    client, token, exchange_wallets, days=7, price_usd=price,
                 )
                 if history:
                     macro[sym] = history
                 # Pause between tokens to be RPC-friendly.
                 await asyncio.sleep(1.0)
             if macro:
-                store.update_macro_daily_flows(macro)
+                store.update_macro_daily_flows(chain_name, macro)
         except Exception as e:
-            log.exception("macro flow loop error")
-            store.record_error(f"macro-flow: {type(e).__name__}: {e}")
-        store.record_loop_duration("macro_flow", _t.monotonic() - cycle_start)
+            log.exception("macro flow loop error (%s)", chain_name)
+            store.record_error(f"macro-flow[{chain_name}]: {type(e).__name__}: {e}")
+        store.record_loop_duration(timing_key, _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -1206,7 +1251,10 @@ def _runner() -> None:
         # fallback list so a slow BSC node won't block ETH.
         for chain_name, client in chain_clients.items():
             loop.create_task(_onchain_loop(_store, client))
-        loop.create_task(_macro_flow_loop(_store, eth_chain))
+        # Macro flow per chain — same liquidity-stack tokens (stables + BTC + ETH
+        # proxy) on each, but BSC uses Binance-Peg variants with 18 decimals.
+        for chain_name, client in chain_clients.items():
+            loop.create_task(_macro_flow_loop(_store, client))
         loop.create_task(_score_history_loop(_store))
         loop.create_task(_alerts_loop(_store, telegram))
         # Liquidation tape — long-running WebSocket consumer. The task auto-
