@@ -31,6 +31,14 @@ alerts:
     enabled: true
     abs_threshold: 25       # alert when |score Δ 1h| >= this
 
+  # Fresh-setup alert (Round 41) — fires when a row newly enters Fresh bull
+  # or Fresh bear quality (signal age < 1h, σ < 30) AND has high conviction.
+  # Complements composite_score by catching setups in their first hour
+  # specifically — the asymmetric-edge window before the move accumulates.
+  fresh_setup:
+    enabled: true
+    min_abs_score: 70
+
   # Funding-rate deviation — fires when current funding is z >= threshold
   # away from its ~30-period mean. Mean-revert candidates: extreme overshoot
   # often precedes a cooldown; extreme undershoot precedes a squeeze.

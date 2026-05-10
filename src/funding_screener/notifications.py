@@ -401,6 +401,58 @@ def evaluate_oi_surge_alerts(
     return out
 
 
+def evaluate_fresh_setup_alerts(
+    combined_rows,
+    min_abs_score: int = 70,
+) -> list[tuple[str, str, str]]:
+    """Fresh-setup alert (Round 41).
+
+    Fires when a row's setup_quality_label is in the "Fresh bull" or
+    "Fresh bear" bucket AND its absolute composite score meets the threshold.
+    This complements the broader composite_score alert by specifically
+    catching setups in their first hour with high conviction — the moment
+    of asymmetric edge before the move accumulates.
+
+    Why a separate alert kind (instead of just filtering composite_score
+    by quality): the regime semantics differ. composite_score fires once on
+    crossing ±threshold and resolves when score returns; fresh_setup fires
+    once on entering Fresh-with-conviction and resolves when EITHER the
+    quality drops out of Fresh OR the score retreats. They have independent
+    cooldowns and audit-log entries.
+    """
+    out: list[tuple[str, str, str]] = []
+    for r in combined_rows:
+        score = getattr(r, "composite_score", None)
+        label = getattr(r, "setup_quality_label", None)
+        if score is None or not label:
+            continue
+        key = f"fresh:{r.base_asset}/{r.quote_asset}"
+        is_fresh_with_conviction = (
+            "Fresh" in label and abs(score) >= min_abs_score
+        )
+        if is_fresh_with_conviction:
+            sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+            direction = "long" if score > 0 else "short"
+            head_emoji = "🚀" if score > 0 else "💥"
+            thesis_block = _build_thesis_block_for_row(r)
+            header = (
+                f"{head_emoji} *{sym}* — fresh {direction} setup\n"
+                f"score `{score:+d}` · quality {label}\n"
+                "Just lit up — likely still un-priced. Composite alert may follow if the move "
+                "sustains; this fires earlier on the freshness window."
+            )
+            msg = header + (f"\n\n{thesis_block}" if thesis_block else "")
+            out.append((key, "active", msg))
+        else:
+            sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+            out.append((
+                key, "resolved",
+                f"📊 {sym} fresh-setup window cleared "
+                f"(quality={label}, score={score:+d}).",
+            ))
+    return out
+
+
 def evaluate_funding_deviation_alerts(
     combined_rows,
     z_threshold: float = 2.5,

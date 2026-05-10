@@ -37,6 +37,7 @@ from .notifications import (
     EmailClient,
     TelegramClient,
     evaluate_composite_alerts,
+    evaluate_fresh_setup_alerts,
     evaluate_funding_alerts,
     evaluate_funding_deviation_alerts,
     evaluate_liquidation_cascade_alerts,
@@ -598,6 +599,13 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     events.extend(evaluate_score_delta_alerts(
                         combined_rows,
                         abs_threshold=int(sd.get("abs_threshold", 25)),
+                    ))
+                # Fresh-setup alert — added Round 41.
+                if cfg.get("fresh_setup", {}).get("enabled", True):
+                    fs = cfg["fresh_setup"]
+                    events.extend(evaluate_fresh_setup_alerts(
+                        combined_rows,
+                        min_abs_score=int(fs.get("min_abs_score", 70)),
                     ))
                 # Funding-deviation alerts — added Round 13. Re-uses the
                 # combined_rows that already have funding_deviation_z attached.
