@@ -856,6 +856,93 @@ else:
 st.divider()
 
 
+# ---------------- 6. SECTOR PEERS (Round 46) ----------------
+# Answers "is this signal idiosyncratic or sector-wide?" by showing the top 3
+# OTHER pairs in the same sector with their key metrics side-by-side. If the
+# whole sector is positioned the same way, that strengthens the thesis; if
+# only this symbol is, the move is idiosyncratic.
+
+st.subheader("6. Sector peers")
+from funding_screener.sectors import find_sector_peers, sector_for as _peer_sector_for  # noqa: E402
+from funding_screener.screener import screen_combined_high_funding as _peer_screen  # noqa: E402
+
+_peer_target_sector = _peer_sector_for(base_asset)
+if not _peer_target_sector:
+    st.caption(
+        f"No sector classification for {base_asset}. Add it to "
+        "`config/symbol_sectors.yaml` to enable peer comparisons."
+    )
+else:
+    # Build a fresh combined-rows dataset across BOTH exchanges so we can
+    # find peers regardless of which one the user originated from.
+    _peer_bnb = store.read_binance()
+    _peer_mxc = store.read_mexc()
+    _peer_enrich = store.read_enrichments()
+    _peer_onchain, _ = store.read_onchain_flows()
+    _peer_onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in _peer_onchain}
+    _peer_klines: dict = {}
+    _peer_klines.update(_peer_bnb.klines)
+    _peer_klines.update(_peer_mxc.klines)
+    _peer_rows = _peer_screen(
+        _peer_bnb.funding, _peer_mxc.funding,
+        _peer_bnb.contracts, _peer_mxc.contracts,
+        _peer_enrich,
+        threshold_percent=0.0,
+        binance_volumes=_peer_bnb.volumes, mexc_volumes=_peer_mxc.volumes,
+        min_volume_usd_per_side=0.0,
+        onchain_netflow_by_base=_peer_onchain_by_base,
+        klines_by_symbol=_peer_klines,
+    )
+    peers = find_sector_peers(base_asset, _peer_rows, top_n=3)
+    if not peers:
+        st.caption(
+            f"**{_peer_target_sector}** sector — no other tracked tokens in this sector "
+            "have an enriched score yet. Try again in a few minutes after the enrichment "
+            "loop catches up."
+        )
+    else:
+        st.caption(
+            f"Top 3 other tokens in the **{_peer_target_sector}** sector by absolute "
+            "composite score. Sector-wide same-direction reading reinforces the thesis; "
+            "divergent peers suggest the current symbol's move is idiosyncratic."
+        )
+        peer_cols = st.columns(len(peers))
+        for col, p in zip(peer_cols, peers):
+            sym_p = p.binance_symbol or p.mexc_symbol or p.base_asset
+            score_p = p.composite_score or 0
+            score_label = p.composite_short or ""
+            funding_p = (
+                p.binance_rate_8h_norm_percent
+                if p.binance_rate_8h_norm_percent is not None
+                else p.mexc_rate_8h_norm_percent
+            )
+            with col:
+                col.metric(
+                    sym_p,
+                    f"{score_p:+d}",
+                    delta=f"{p.composite_emoji or ''} {score_label}",
+                    delta_color="off",
+                    help=(
+                        f"Funding (8h-norm): "
+                        f"{funding_p:+.4f}%/8h" if funding_p is not None else "—"
+                    ) + (
+                        f"\nQuality: {p.setup_quality_label}" if p.setup_quality_label else ""
+                    ),
+                )
+                if p.binance_symbol:
+                    col.markdown(
+                        f"[{sym_p} →]"
+                        f"(/Symbol_Detail?exchange=Binance&symbol={p.binance_symbol})"
+                    )
+                elif p.mexc_symbol:
+                    col.markdown(
+                        f"[{sym_p} →]"
+                        f"(/Symbol_Detail?exchange=MEXC&symbol={p.mexc_symbol})"
+                    )
+
+st.divider()
+
+
 # ---------------- footer ----------------
 
 st.markdown(

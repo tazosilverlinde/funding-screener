@@ -1,7 +1,8 @@
 """Symbol sector / category lookup loaded from `config/symbol_sectors.yaml`.
 
 Provides a fast `sector_for(base_asset)` mapping plus the inverse — list of
-tokens per sector — for the sidebar filter on Pages 2/3/4.
+tokens per sector — for the sidebar filter on Pages 2/3/4. Also exposes
+`find_sector_peers` (Round 46) for the Symbol Detail peer comparison.
 """
 
 from __future__ import annotations
@@ -61,6 +62,43 @@ def all_sectors() -> list[str]:
 def symbols_in_sector(sector: str) -> set[str]:
     """All base assets assigned to a sector (uppercase)."""
     return set(_load_raw().get(sector, []))
+
+
+def find_sector_peers(
+    target_base: str,
+    combined_rows,
+    top_n: int = 3,
+) -> list:
+    """Return top-N other rows in the same sector as `target_base`, ordered by
+    absolute composite score descending.
+
+    "Peer" = same sector, different base. Used by Symbol Detail to answer
+    "is this signal idiosyncratic or sector-wide?" Returns an empty list
+    when:
+      - target has no sector mapping
+      - no other rows match the sector
+      - all peer rows have None composite_score (not yet enriched)
+
+    Rows missing a composite_score are skipped (we can't rank them).
+    Rows with the SAME base as the target are excluded so the target
+    doesn't show up as its own peer.
+    """
+    target_base = (target_base or "").upper()
+    target_sector = sector_for(target_base)
+    if not target_sector:
+        return []
+    peers: list = []
+    for r in combined_rows or []:
+        base = (getattr(r, "base_asset", "") or "").upper()
+        if not base or base == target_base:
+            continue
+        if (getattr(r, "sector", None) or sector_for(base)) != target_sector:
+            continue
+        if getattr(r, "composite_score", None) is None:
+            continue
+        peers.append(r)
+    peers.sort(key=lambda r: abs(r.composite_score), reverse=True)
+    return peers[:top_n]
 
 
 def sector_aggregates(combined_rows) -> list[dict]:
