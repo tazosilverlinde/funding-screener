@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .config import is_binance_enabled, is_mexc_enabled, settings
@@ -375,6 +375,29 @@ class DataStore:
         with self._lock:
             return {p: exp for p, exp in self.alert_mutes.items() if exp > now}
 
+    def trim_score_history_to_hours(self, hours: float) -> int:
+        """Drop score-history samples older than `hours` from now (Round 54).
+
+        Returns the number of samples dropped. Used by the memory-pressure
+        auto-trim path. The default trim_old (in score_history.py) uses
+        HISTORY_WINDOW_HOURS=24; this lets the alerts loop request a tighter
+        window (e.g. 12h) only when memory pressure warrants it.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        dropped = 0
+        with self._lock:
+            for key, samples in list(self.score_history.items()):
+                before = len(samples)
+                self.score_history[key] = [
+                    (t, s) for (t, s) in samples if t >= cutoff
+                ]
+                dropped += before - len(self.score_history[key])
+                # Drop the entire entry when it's empty post-trim — keeps
+                # the dict from accumulating dead keys.
+                if not self.score_history[key]:
+                    del self.score_history[key]
+        return dropped
+
     # ---- readers (thread-safe; called from Streamlit page renders) ----
 
     def read_binance(self) -> ExchangeSnapshot:
@@ -713,6 +736,26 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     budget_mb=float(mp.get("budget_mb", PROCESS_MEMORY_BUDGET_MB)),
                     pct_threshold=float(mp.get("pct_threshold", 75.0)),
                 ))
+                # Auto-trim (Round 54) — when RSS is in the pressure region AND
+                # auto-trim is configured, defensively shrink the two biggest
+                # growable buffers. Opt-in (disabled by default) since it's
+                # destructive: trimmed history can't be reconstructed.
+                auto_trim_cfg = mp.get("auto_trim") or {}
+                if (
+                    auto_trim_cfg.get("enabled", False)
+                    and rss_mb is not None
+                    and rss_mb / float(mp.get("budget_mb", PROCESS_MEMORY_BUDGET_MB)) * 100.0
+                    >= float(mp.get("pct_threshold", 75.0))
+                ):
+                    score_hours = float(auto_trim_cfg.get("score_history_hours", 12))
+                    liq_window_s = int(auto_trim_cfg.get("liq_window_seconds", 12 * 3600))
+                    dropped_scores = store.trim_score_history_to_hours(score_hours)
+                    dropped_liqs = store.liquidations.trim_to_window_seconds(liq_window_s)
+                    if dropped_scores or dropped_liqs:
+                        log.info(
+                            "memory auto-trim fired at RSS=%.0f MB: dropped %d score samples, %d liq events",
+                            rss_mb, dropped_scores, dropped_liqs,
+                        )
 
             # Apply state machine: fire only on off→on transitions, send "resolved"
             # only for previously-active keys. Each successful fire is recorded

@@ -68,6 +68,17 @@ alerts:
     budget_mb: 2048           # the hard cap; matches process_memory.PROCESS_MEMORY_BUDGET_MB
     pct_threshold: 75         # alert when RSS / budget * 100 >= this
 
+    # Auto-trim (Round 54) — when memory pressure crosses pct_threshold AND
+    # auto_trim.enabled is true, the alerts loop defensively shrinks the two
+    # biggest growable buffers (score history + liquidations) on the next
+    # tick. Opt-in because trimming is destructive: trimmed history is gone.
+    # Suggested when running close to the cap; leave disabled if you have
+    # headroom and prefer pristine history.
+    auto_trim:
+      enabled: false
+      score_history_hours: 12      # default 24h; trim to this when fired
+      liq_window_seconds: 43200    # 12 hours; default 24h elsewhere
+
   # Alert summary digest (Round 50) — sends ONE batched Telegram message
   # every `interval_minutes` summarizing every alert that fired since the
   # previous summary, grouped by kind. Complementary to per-event firing

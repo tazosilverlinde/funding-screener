@@ -222,6 +222,27 @@ class LiquidationsBuffer:
             slot["count"] += 1
         return [bins[k] for k in sorted(bins.keys())]
 
+    def trim_to_window_seconds(self, window_seconds: int) -> int:
+        """Aggressively drop events older than `window_seconds` from now (Round 54).
+
+        Returns the number of events dropped. Used by the auto-trim path in
+        the alerts loop when memory pressure crosses the configured threshold.
+        Idempotent — calling repeatedly with the same window has no further
+        effect after the first call (already-dropped events stay dropped).
+
+        Note: this is independent of the per-bin pruning that happens lazily
+        on read (`_prune`); auto-trim happens proactively.
+        """
+        cutoff = time.time() - max(0, window_seconds)
+        dropped = 0
+        for sym, dq in list(self._buf.items()):
+            before = len(dq)
+            self._prune(dq, cutoff)
+            dropped += before - len(dq)
+            if not dq:
+                del self._buf[sym]
+        return dropped
+
     def total_events_seen(self) -> int:
         """Lifetime count since process start — used for health/debug."""
         return self._total_events_seen
