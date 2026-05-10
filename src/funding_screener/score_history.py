@@ -52,6 +52,53 @@ def score_delta(samples: list[tuple[datetime, int]], minutes_ago: int) -> Option
     return int(current - best[1])
 
 
+def signal_age_hours(
+    samples: list[tuple[datetime, int]],
+    threshold: int = 30,
+) -> Optional[float]:
+    """How many hours since the score first crossed `threshold` and stayed above it.
+
+    The threshold is signed: positive thresholds (+30) ask "how long has this
+    been bullish?"; negative thresholds (-30) ask "how long has this been
+    bearish?".
+
+    Returns:
+      - hours since the most recent transition into the threshold region
+      - 0.0 if the signal just crossed (latest sample is the transition)
+      - None when the most recent sample doesn't satisfy the threshold (i.e.
+        no current signal to age) OR fewer than 2 samples exist.
+
+    Why "since most recent transition" rather than "first time ever":
+    if a pair was bullish 12h ago, dropped to neutral, then re-entered bullish
+    2h ago, the actionable age is 2h not 12h — the current signal is fresh.
+    """
+    if not samples or len(samples) < 2:
+        return None
+    latest_score = samples[-1][1]
+    if threshold >= 0:
+        if latest_score < threshold:
+            return None
+        in_region = lambda s: s >= threshold
+    else:
+        if latest_score > threshold:
+            return None
+        in_region = lambda s: s <= threshold
+
+    # Walk samples chronologically to find the most recent IN-region sample
+    # whose predecessor was OUT-of-region — that's the transition timestamp,
+    # the first observation of the current signal. If every sample is in-region
+    # (signal has been on for the full history window), use the oldest sample
+    # so age == full window.
+    transition_ts: datetime = samples[0][0]  # default: full window
+    for i in range(len(samples) - 1, 0, -1):
+        if not in_region(samples[i - 1][1]):
+            # samples[i] is the first in-region observation after a gap.
+            transition_ts = samples[i][0]
+            break
+    now = samples[-1][0]
+    return max(0.0, (now - transition_ts).total_seconds() / 3600.0)
+
+
 def score_volatility(
     samples: list[tuple[datetime, int]], min_samples: int = 4,
 ) -> Optional[float]:

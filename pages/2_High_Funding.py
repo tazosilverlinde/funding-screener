@@ -152,6 +152,7 @@ df = to_df(
         "composite_score",
         "composite_score_delta_1h",
         "composite_score_stddev_24h",
+        "signal_age_hours",
         "composite_emoji",
         "composite_short",
         "signal_emoji",
@@ -188,16 +189,17 @@ df = to_df(
 )
 
 if not df.empty:
-    # Composite Score column + 1h delta + 24h std-dev (signal stability).
+    # Composite Score column + 1h delta + 24h std-dev (signal stability) + age.
     df["Score"] = df["composite_score"]
     df["Δ 1h"] = df["composite_score_delta_1h"]
     df["σ 24h"] = df["composite_score_stddev_24h"]
+    df["Age (h)"] = df["signal_age_hours"]
     df["Score label"] = (
         df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
     )
     df = df.drop(columns=[
         "composite_score", "composite_score_delta_1h", "composite_score_stddev_24h",
-        "composite_emoji", "composite_short",
+        "signal_age_hours", "composite_emoji", "composite_short",
     ])
     # Combine emoji + short label into one cell for compact display.
     df["Signal"] = df["signal_emoji"].fillna("") + " " + df["signal_short"].fillna("")
@@ -208,8 +210,8 @@ if not df.empty:
     df = df.drop(columns=["funding_deviation_label", "funding_deviation_z"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / σ / Signal / Dev / Liq to the front.
-    front = ["Score", "Δ 1h", "σ 24h", "Score label", "Signal", "Dev", "Dev z", "Liq 24h"]
+    # Move Score / Δ / σ / Age / Signal / Dev / Liq to the front.
+    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score label", "Signal", "Dev", "Dev z", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -299,6 +301,20 @@ if not df.empty:
                 "  σ 10-30 → normal score evolution\n"
                 "  σ > 30  → noisy / signal flipping (treat with caution)\n\n"
                 "Empty when fewer than 4 samples (≈40 min after restart)."
+            ),
+        ),
+        "Age (h)": st.column_config.NumberColumn(
+            "Age (h)",
+            format="%.1f",
+            help=(
+                "Hours since the score most-recently entered the bullish "
+                "(≥+30) or bearish (≤−30) region. Sortable: ascending shows "
+                "the **freshest** setups (potentially still un-priced); "
+                "descending shows mature ones (likely already moved).\n\n"
+                "  < 1h  → fresh, attention-worthy\n"
+                "  1-6h  → developing\n"
+                "  > 12h → mature, late-cycle\n\n"
+                "Empty for neutral rows or new history (< 2 samples)."
             ),
         ),
         "Score label": st.column_config.TextColumn(

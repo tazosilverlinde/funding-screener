@@ -13,7 +13,11 @@ from typing import Iterable, Optional
 from datetime import datetime
 
 from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow, Kline
-from ..score_history import score_delta as _score_delta, score_volatility as _score_volatility
+from ..score_history import (
+    score_delta as _score_delta,
+    score_volatility as _score_volatility,
+    signal_age_hours as _signal_age_hours,
+)
 from ..sectors import sector_for
 from ..signals import (
     classify_signal,
@@ -232,6 +236,15 @@ def screen_combined_high_funding(
                 ),
                 composite_score_stddev_24h=_score_volatility(
                     score_histories.get((base, quote)) or []
+                ),
+                signal_age_hours=(
+                    _signal_age_hours(
+                        score_histories.get((base, quote)) or [],
+                        threshold=30 if (composite.score >= 30) else (
+                            -30 if composite.score <= -30 else 30
+                        ),
+                    )
+                    if abs(composite.score) >= 30 else None
                 ),
                 realized_vol_30d_pct=vol_30d,
                 funding_per_vol=funding_per_vol,

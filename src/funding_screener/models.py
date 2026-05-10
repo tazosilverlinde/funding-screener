@@ -149,6 +149,11 @@ class CombinedFundingRow(_Frozen):
     # Low = persistent regime; high = unstable/noisy signal. None when fewer
     # than 4 samples available (≈40min after process start).
     composite_score_stddev_24h: Optional[float] = None
+    # How long the current signal has been active (hours since the score
+    # crossed +30 / -30, depending on direction). None for neutral rows or
+    # too-short history. Fresh signals (< 1h) deserve attention; stale ones
+    # (> 12h) are likely already priced in.
+    signal_age_hours: Optional[float] = None
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.
