@@ -274,18 +274,38 @@ def evaluate_funding_alerts(funding_rows, threshold_pct: float) -> list[tuple[st
     return out
 
 
-def evaluate_composite_alerts(combined_rows, bull_threshold: int, bear_threshold: int) -> list[tuple[str, str, str]]:
-    """Composite-score alert evaluator. Round 38: now embeds the auto-thesis in
-    the message body so users get the bull/bear/risk breakdown via Telegram
-    without having to open the app.
+def _build_thesis_block_for_row(row) -> str:
+    """Compose the auto-thesis from a row's optional fields and format it as
+    Telegram Markdown. Returns "" when no reasons or risks fire.
 
-    The thesis is computed inline from the row's already-attached fields — no
-    extra fetches. Pure-function call so this stays fast.
+    Shared between every row-based alert evaluator that wants to enrich its
+    Telegram message — composite, score-delta, funding-deviation, oi-surge.
+    Uses getattr so older row shapes (e.g. test fixtures missing the new
+    fields) still work without forcing a model migration.
     """
-    # Local import keeps the alerts module's load path lean (thesis isn't
-    # needed for any other evaluator).
     from .thesis import compose_trade_thesis, format_thesis_for_telegram
+    sym = row.binance_symbol or row.mexc_symbol or row.base_asset
+    thesis = compose_trade_thesis(
+        symbol=sym,
+        composite_score=getattr(row, "composite_score", None),
+        funding_8h_norm_pct=getattr(row, "binance_rate_8h_norm_percent", None)
+                            or getattr(row, "mexc_rate_8h_norm_percent", None),
+        mark_index_spread_pct=getattr(row, "binance_mark_index_spread_percent", None),
+        oi_change_24h_pct=getattr(row, "binance_oi_change_24h_pct", None),
+        ls_ratio_global=getattr(row, "binance_ls_ratio_global", None),
+        ls_ratio_top=getattr(row, "binance_ls_ratio_top", None),
+        funding_deviation_z=getattr(row, "funding_deviation_z", None),
+        signal_age_hours=getattr(row, "signal_age_hours", None),
+        score_stddev_24h=getattr(row, "composite_score_stddev_24h", None),
+        setup_quality_label=getattr(row, "setup_quality_label", None),
+    )
+    return format_thesis_for_telegram(thesis)
 
+
+def evaluate_composite_alerts(combined_rows, bull_threshold: int, bear_threshold: int) -> list[tuple[str, str, str]]:
+    """Composite-score alert evaluator. Round 38: embeds the auto-thesis in the
+    message body so users get the bull/bear/risk breakdown without opening the app.
+    """
     out: list[tuple[str, str, str]] = []
     for r in combined_rows:
         if r.composite_score is None:
@@ -295,23 +315,7 @@ def evaluate_composite_alerts(combined_rows, bull_threshold: int, bear_threshold
         if score >= bull_threshold or score <= bear_threshold:
             sym = r.binance_symbol or r.mexc_symbol or r.base_asset
             head_emoji = "🚀" if score >= bull_threshold else "💥"
-            # Build the thesis from row inputs. Fields not on the row default
-            # to None inside compose_trade_thesis, which silently skips them.
-            thesis = compose_trade_thesis(
-                symbol=sym,
-                composite_score=score,
-                funding_8h_norm_pct=getattr(r, "binance_rate_8h_norm_percent", None)
-                                    or getattr(r, "mexc_rate_8h_norm_percent", None),
-                mark_index_spread_pct=getattr(r, "binance_mark_index_spread_percent", None),
-                oi_change_24h_pct=getattr(r, "binance_oi_change_24h_pct", None),
-                ls_ratio_global=getattr(r, "binance_ls_ratio_global", None),
-                ls_ratio_top=getattr(r, "binance_ls_ratio_top", None),
-                funding_deviation_z=getattr(r, "funding_deviation_z", None),
-                signal_age_hours=getattr(r, "signal_age_hours", None),
-                score_stddev_24h=getattr(r, "composite_score_stddev_24h", None),
-                setup_quality_label=getattr(r, "setup_quality_label", None),
-            )
-            thesis_block = format_thesis_for_telegram(thesis)
+            thesis_block = _build_thesis_block_for_row(r)
             header = (
                 f"{head_emoji} *{sym}* — composite score `{score:+d}`\n"
                 f"{r.composite_emoji} {r.composite_short}"
@@ -328,7 +332,8 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
 
     Catches momentum shifts BEFORE the absolute score crosses the extremes:
     a row that just went from +20 to +60 in 1h is more interesting than one
-    that's been at +75 stable for hours.
+    that's been at +75 stable for hours. Round 39: also embeds the thesis so
+    users see the case-for/case-against alongside the delta.
     """
     out: list[tuple[str, str, str]] = []
     for r in combined_rows:
@@ -339,11 +344,13 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
         if abs(delta) >= abs_threshold:
             sym = r.binance_symbol or r.mexc_symbol or r.base_asset
             arrow = "🚀 surging" if delta > 0 else "💥 plunging"
-            msg = (
+            thesis_block = _build_thesis_block_for_row(r)
+            header = (
                 f"{arrow} *{sym}* — composite score Δ `{delta:+d}` in last 1h\n"
                 f"Current: `{r.composite_score:+d}` ({r.composite_emoji} {r.composite_short})\n"
                 "Momentum shifting fast — check what triggered it."
             )
+            msg = header + (f"\n\n{thesis_block}" if thesis_block else "")
             out.append((key, "active", msg))
         else:
             out.append((key, "resolved", f"📊 {r.base_asset}/{r.quote_asset} score Δ back below threshold."))
@@ -382,10 +389,9 @@ def evaluate_oi_surge_alerts(
             else:
                 emoji = "📉"
                 direction = "Rapid unwind — short squeeze relief, capitulation, or post-cascade settlement"
-            msg = (
-                f"{emoji} *{sym}* — OI Δ24h `{oi_pct:+.1f}%`\n"
-                f"{direction}"
-            )
+            thesis_block = _build_thesis_block_for_row(r)
+            header = f"{emoji} *{sym}* — OI Δ24h `{oi_pct:+.1f}%`\n{direction}"
+            msg = header + (f"\n\n{thesis_block}" if thesis_block else "")
             out.append((key, "active", msg))
         else:
             out.append((
@@ -416,6 +422,8 @@ def evaluate_funding_deviation_alerts(
         if z is None:
             continue
         sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+        # Build the thesis ONCE per row (same for both direction keys).
+        thesis_block = _build_thesis_block_for_row(r)
         # One key per direction — we track overshoot and undershoot separately.
         for direction, predicate, emoji, label in (
             ("over", z >= z_threshold, "🔥", "extreme overshoot"),
@@ -428,11 +436,12 @@ def evaluate_funding_deviation_alerts(
                     if direction == "over"
                     else "Mean-revert candidate (long-funding-side, **squeeze setup**)"
                 )
-                msg = (
+                header = (
                     f"{emoji} *{sym}* — funding {label}\n"
                     f"z-score: `{z:+.1f}σ` vs ~30-period mean\n"
                     f"{bias}"
                 )
+                msg = header + (f"\n\n{thesis_block}" if thesis_block else "")
                 out.append((key, "active", msg))
             else:
                 out.append((
