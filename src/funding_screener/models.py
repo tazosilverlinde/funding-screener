@@ -154,6 +154,37 @@ class CombinedFundingRow(_Frozen):
     funding_deviation_classification: Optional[str] = None  # bucket name from FundingDeviation
 
 
+class CrossExchangeArbRow(_Frozen):
+    """One row of Binance↔MEXC funding-spread arbitrage on the same base/quote.
+
+    Output of `screen_cross_exchange_arb`. The `long_*` fields name the side
+    receiving the larger funding payment (or paying less); `short_*` is the
+    other side. Net is 8h-normalised so different funding cadences compare.
+    """
+
+    base_asset: str
+    quote_asset: str
+    binance_symbol: str
+    mexc_symbol: str
+    binance_rate_8h_norm_percent: float
+    mexc_rate_8h_norm_percent: float
+    diff_8h_norm_percent: float
+    binance_maker_fee_percent: float
+    mexc_maker_fee_percent: float
+    fees_total_percent: float                # 4 × avg maker fee (open+close per leg)
+    net_8h_norm_percent: float               # diff_8h_norm - fees_total
+    apr_estimate_percent: float              # upper-bound annualized yield
+    long_exchange: str                       # "Binance" or "MEXC"
+    long_symbol: str
+    short_exchange: str
+    short_symbol: str
+    binance_next_funding_time: Optional[datetime]
+    mexc_next_funding_time: Optional[datetime]
+    funding_time_skew_minutes: Optional[float]   # |Δ| of the two next-funding clocks
+    binance_volume_24h_usd: float
+    mexc_volume_24h_usd: float
+
+
 class PriceRiseRow(_Frozen):
     """Output row for the close-to-close price-rise screener."""
 
