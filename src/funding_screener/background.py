@@ -28,6 +28,7 @@ from .market_data import CoinPaprikaClient
 from .models import ContractInfo, EnrichmentData, FundingRow, Kline
 from .digest import (
     compose_daily_digest,
+    compose_system_status_line,
     format_digest_as_html,
     format_digest_as_text,
 )
@@ -1436,6 +1437,38 @@ async def _daily_digest_loop(
             # full universe, like before.
             _alerts_cfg_for_digest = (load_alerts_config() or {}).get("alerts") or {}
             digest_watchlist = parse_watchlist(_alerts_cfg_for_digest.get("watchlist"))
+
+            # System status footer (Round 58) — built from the same data the
+            # System Health page uses so the digest health-snapshot stays
+            # consistent with what's on Page 12.
+            _rss = current_process_memory_mb()
+            _last_ran = store.read_last_loop_ran_at()
+            _expected_intervals_for_digest = {
+                "fast": 60, "slow": 300, "market_caps": 300, "enrichment": 180,
+                "macro": 900, "score_history": 600,
+                "onchain.ethereum": 900, "onchain.bsc": 900,
+                "macro_flow.ethereum": 21600, "macro_flow.bsc": 21600,
+            }
+            _now_dt = datetime.now(timezone.utc)
+            _stalled = sum(
+                1
+                for name, expected_s in _expected_intervals_for_digest.items()
+                if (ran_at := _last_ran.get(name)) is not None
+                and (_now_dt - ran_at).total_seconds() >= 3.0 * expected_s
+            )
+            _digest_alerts_24h = sum(
+                1 for r in store.alert_log.recent(limit=10_000)
+                if (time.time() - r.fired_at) <= 24 * 3600
+            )
+            system_status_line = compose_system_status_line(
+                rss_mb=_rss,
+                budget_mb=PROCESS_MEMORY_BUDGET_MB,
+                n_loops_total=len(_last_ran),
+                n_loops_stalled=_stalled,
+                n_recent_errors=len(store.read_recent_errors()),
+                n_alerts_24h=_digest_alerts_24h,
+            )
+
             digest = compose_daily_digest(
                 combined_rows=combined_rows,
                 liq_stats_by_symbol=liq_stats,
@@ -1444,6 +1477,7 @@ async def _daily_digest_loop(
                 stablecoin_supply=store.read_stablecoin_supply(),
                 sector_rows=sector_rows,
                 watchlist=digest_watchlist,
+                system_status_line=system_status_line,
                 top_n=top_n,
             )
             text_body = format_digest_as_text(digest, top_n=top_n)

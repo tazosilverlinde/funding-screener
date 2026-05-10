@@ -164,6 +164,42 @@ def sector_winners_and_losers(sector_rows: Iterable, top_n: int = 3) -> tuple[li
     return winners, losers
 
 
+def compose_system_status_line(
+    rss_mb: Optional[float],
+    budget_mb: float,
+    n_loops_total: int,
+    n_loops_stalled: int,
+    n_recent_errors: int,
+    n_alerts_24h: int,
+) -> str:
+    """One-line health summary for the daily digest footer (Round 58).
+
+    Inputs are the same data the System Health page consumes — caller
+    provides them so this stays a pure function. Output reads naturally
+    in the digest:
+
+      🩺 System: 14 loops healthy · RSS 412MB/2048MB · 0 recent errors · 47 alerts last 24h
+
+    or with issues:
+
+      🩺 System: 12 loops healthy + 2 STALLED · RSS 1700MB/2048MB · 8 recent errors · 47 alerts last 24h
+    """
+    pct = (rss_mb / budget_mb * 100.0) if (rss_mb is not None and budget_mb > 0) else None
+    rss_part = (
+        f"RSS {rss_mb:,.0f}MB/{budget_mb:,.0f}MB ({pct:.0f}%)"
+        if rss_mb is not None and pct is not None
+        else "RSS unknown"
+    )
+    healthy = n_loops_total - n_loops_stalled
+    if n_loops_stalled > 0:
+        loops_part = f"{healthy} loops healthy + {n_loops_stalled} STALLED"
+    else:
+        loops_part = f"{n_loops_total} loops healthy"
+    err_part = f"{n_recent_errors} recent errors"
+    alerts_part = f"{n_alerts_24h} alerts last 24h"
+    return f"🩺 System: {loops_part} · {rss_part} · {err_part} · {alerts_part}"
+
+
 def compose_daily_digest(
     *,
     combined_rows: Iterable,
@@ -173,6 +209,7 @@ def compose_daily_digest(
     stablecoin_supply: dict | None = None,
     sector_rows: Iterable | None = None,
     watchlist: set[str] | None = None,
+    system_status_line: str | None = None,
     top_n: int = 5,
 ) -> dict:
     """Aggregate everything into one structured digest dict.
@@ -228,6 +265,10 @@ def compose_daily_digest(
         winners, losers = sector_winners_and_losers(sector_rows, top_n=3)
         digest["sector_winners"] = winners
         digest["sector_losers"] = losers
+    # Optional system-status footer (Round 58). Caller passes the prebuilt line
+    # to keep compose_daily_digest a pure function with no DataStore access.
+    if system_status_line:
+        digest["system_status"] = system_status_line
     return digest
 
 
@@ -329,6 +370,12 @@ def format_digest_as_text(digest: dict, top_n: int = 5) -> str:
                 for s in digest["sector_losers"]
             )
             lines.append(f"Sector laggards: {losers}")
+
+    # System status footer (Round 58) — appended last so the operator sees
+    # market signals first, infra health as a sign-off.
+    if digest.get("system_status"):
+        lines.append("")
+        lines.append(digest["system_status"])
 
     return "\n".join(lines)
 
@@ -444,6 +491,14 @@ def format_digest_as_html(digest: dict, top_n: int = 5) -> str:
                 for s in digest["sector_losers"]
             )
             parts.append(f"<p><b>Laggards:</b> {losers}</p>")
+
+    # System status footer (Round 58) — small italic line above the boilerplate
+    # so operators see infra health as part of every digest.
+    if digest.get("system_status"):
+        parts.append(
+            f'<p style="color:#555;font-size:13px;font-style:italic;">'
+            f'{digest["system_status"]}</p>'
+        )
 
     parts.append(
         '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">'

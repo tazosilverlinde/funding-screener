@@ -232,3 +232,105 @@ async def test_send_returns_false_on_smtp_exception(monkeypatch):
     ):
         ok = await client.send_message("subj", "plain", "<p>html</p>")
     assert ok is False
+
+
+# ---------------- Round 58: compose_system_status_line + footer plumbing ----------------
+
+
+def test_system_status_line_healthy_state():
+    from funding_screener.digest import compose_system_status_line
+    line = compose_system_status_line(
+        rss_mb=412.0, budget_mb=2048.0,
+        n_loops_total=14, n_loops_stalled=0,
+        n_recent_errors=0, n_alerts_24h=47,
+    )
+    assert "🩺" in line
+    assert "14 loops healthy" in line
+    assert "STALLED" not in line
+    assert "412MB" in line
+    assert "2,048MB" in line
+    assert "0 recent errors" in line
+    assert "47 alerts last 24h" in line
+
+
+def test_system_status_line_with_stall_and_pressure():
+    from funding_screener.digest import compose_system_status_line
+    line = compose_system_status_line(
+        rss_mb=1700.0, budget_mb=2048.0,
+        n_loops_total=14, n_loops_stalled=2,
+        n_recent_errors=12, n_alerts_24h=89,
+    )
+    assert "12 loops healthy" in line
+    assert "+ 2 STALLED" in line
+    assert "1,700MB" in line
+    assert "12 recent errors" in line
+
+
+def test_system_status_line_unknown_rss():
+    """When psutil isn't available, RSS should report as unknown rather than 0."""
+    from funding_screener.digest import compose_system_status_line
+    line = compose_system_status_line(
+        rss_mb=None, budget_mb=2048.0,
+        n_loops_total=14, n_loops_stalled=0,
+        n_recent_errors=0, n_alerts_24h=0,
+    )
+    assert "RSS unknown" in line
+
+
+def test_system_status_line_includes_pct():
+    """Percent of budget should appear so the user sees relative pressure."""
+    from funding_screener.digest import compose_system_status_line
+    line = compose_system_status_line(
+        rss_mb=1024.0, budget_mb=2048.0,
+        n_loops_total=14, n_loops_stalled=0,
+        n_recent_errors=0, n_alerts_24h=0,
+    )
+    assert "50%" in line  # 1024/2048
+
+
+def test_compose_daily_digest_includes_system_status_when_passed():
+    """When the caller passes system_status_line, it lands in the digest dict."""
+    from funding_screener.digest import compose_daily_digest
+    line = "🩺 System: 14 loops healthy · …"
+    digest = compose_daily_digest(combined_rows=[], system_status_line=line)
+    assert digest.get("system_status") == line
+
+
+def test_compose_daily_digest_omits_system_status_when_none():
+    """No status line passed → no key in dict (callers can use truthiness)."""
+    from funding_screener.digest import compose_daily_digest
+    digest = compose_daily_digest(combined_rows=[])
+    assert "system_status" not in digest
+
+
+def test_text_format_appends_system_status_at_end():
+    """The footer is appended last so market signals stay first."""
+    from funding_screener.digest import format_digest_as_text
+    digest = {
+        "market_overview": {
+            "total_symbols": 1, "bullish": 0, "bearish": 0, "neutral": 1,
+            "strong_bull": 0, "strong_bear": 0,
+        },
+        "system_status": "🩺 System: all good",
+    }
+    text = format_digest_as_text(digest)
+    # Header first, system_status last.
+    sys_idx = text.find("🩺 System")
+    daily_idx = text.find("Daily market digest")
+    assert daily_idx < sys_idx
+
+
+def test_html_format_renders_system_status_inline():
+    from funding_screener.digest import format_digest_as_html
+    digest = {
+        "market_overview": {
+            "total_symbols": 1, "bullish": 0, "bearish": 0, "neutral": 1,
+            "strong_bull": 0, "strong_bear": 0,
+        },
+        "system_status": "🩺 System: all good · 412MB/2048MB",
+    }
+    html = format_digest_as_html(digest)
+    assert "🩺 System: all good" in html
+    # Should be inline-styled (no <style>/<link>).
+    assert "<style" not in html.lower()
+    assert "<link" not in html.lower()
