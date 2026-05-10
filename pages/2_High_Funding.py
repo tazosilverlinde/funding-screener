@@ -76,6 +76,12 @@ combined_klines.update(binance.klines)
 combined_klines.update(mexc.klines)
 score_histories = store.read_score_histories()
 liq_stats_by_symbol = store.read_liquidations(window_seconds=24 * 3600)
+# Build per-symbol hourly histograms once for the symbols that have any
+# liquidation activity. Avoids 100+ histogram() calls during render.
+liq_histogram_by_symbol: dict[str, list[dict]] = {
+    sym: store.read_liquidations_histogram(sym, bin_seconds=3600, window_seconds=24 * 3600)
+    for sym in liq_stats_by_symbol.keys()
+}
 rows = screen_combined_high_funding(
     binance.funding,
     mexc.funding,
@@ -90,6 +96,7 @@ rows = screen_combined_high_funding(
     klines_by_symbol=combined_klines,
     score_histories=score_histories,
     liq_stats_by_symbol=liq_stats_by_symbol,
+    liq_histogram_by_symbol=liq_histogram_by_symbol,
 )
 
 # Apply sector filter on the *row* set before truncation so sector picks
@@ -161,6 +168,7 @@ df = to_df(
         "funding_deviation_z",
         "funding_history_chart",
         "score_history_chart",
+        "liq_net_hourly_chart",
         "base_asset",
         "quote_asset",
         "sector",
@@ -221,11 +229,17 @@ if not df.empty:
         lambda v: v if isinstance(v, list) and v else None
     )
     df = df.drop(columns=["score_history_chart"])
+    # Net liquidation hourly sparkline (Round 33). Positive = squeeze hours,
+    # negative = cascade hours.
+    df["Liq trend"] = df["liq_net_hourly_chart"].apply(
+        lambda v: v if isinstance(v, list) and v else None
+    )
+    df = df.drop(columns=["liq_net_hourly_chart"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / σ / Age / Score-trend / Signal / Dev / Funding / Liq to the front.
+    # Move Score / Δ / σ / Age / Score-trend / Signal / Dev / Funding / Liq trend / Liq 24h to the front.
     front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score trend", "Score label",
-             "Signal", "Dev", "Dev z", "Funding", "Liq 24h"]
+             "Signal", "Dev", "Dev z", "Funding", "Liq trend", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -397,6 +411,21 @@ if not df.empty:
                 "  • Flat at the top                → mature, possibly priced in\n"
                 "  • Volatile / sawtooth            → unstable signal (cross-ref σ 24h)\n"
                 "  • Trending down                  → conviction draining"
+            ),
+            width="small",
+        ),
+        "Liq trend": st.column_config.LineChartColumn(
+            "Liq trend",
+            help=(
+                "Hourly net liquidation $ over the last 24h, oldest → newest "
+                "(24 bars). Net = short-liq − long-liq, so the line above zero "
+                "is squeeze hours (bullish forced buying) and below zero is "
+                "cascade hours (bearish forced selling).\n\n"
+                "Patterns to look for:\n"
+                "  • Spike at the right edge   → forced flow happening NOW\n"
+                "  • Sustained one-sided run   → directional move with momentum\n"
+                "  • Mostly flat                → quiet symbol (no forced flow)\n"
+                "  • Whipsaw above/below zero  → two-way violent market"
             ),
             width="small",
         ),

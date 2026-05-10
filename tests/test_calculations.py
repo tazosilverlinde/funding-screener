@@ -178,6 +178,52 @@ def test_combined_high_funding_score_chart_empty_for_single_sample():
     assert out[0].score_history_chart == []
 
 
+def test_combined_high_funding_liq_net_chart_populated():
+    """Liq sparkline = short_liq - long_liq per hour bin."""
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    histogram = {
+        "BTCUSDT": [
+            {"ts": 1, "long_liq_usd": 1_000_000, "short_liq_usd": 5_000_000, "count": 10},
+            {"ts": 2, "long_liq_usd": 8_000_000, "short_liq_usd": 1_000_000, "count": 5},
+            {"ts": 3, "long_liq_usd": 0, "short_liq_usd": 0, "count": 0},
+        ],
+    }
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        liq_histogram_by_symbol=histogram,
+    )
+    assert out[0].liq_net_hourly_chart == [4_000_000.0, -7_000_000.0, 0.0]
+
+
+def test_combined_high_funding_liq_net_chart_empty_when_no_events():
+    """All-zero histogram (placeholder bins for empty buffer) → empty chart so
+    Streamlit shows a blank cell rather than a flat-line on zero.
+    """
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    histogram = {
+        "BTCUSDT": [
+            {"ts": 1, "long_liq_usd": 0, "short_liq_usd": 0, "count": 0},
+            {"ts": 2, "long_liq_usd": 0, "short_liq_usd": 0, "count": 0},
+        ],
+    }
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        liq_histogram_by_symbol=histogram,
+    )
+    assert out[0].liq_net_hourly_chart == []
+
+
+def test_combined_high_funding_liq_net_chart_empty_when_no_histogram_arg():
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+    )
+    assert out[0].liq_net_hourly_chart == []
+
+
 def test_combined_high_funding_only_one_side():
     """Base only on Binance: still flagged if Binance rate > threshold."""
     bnb = [_funding("Binance", "FOOUSDT", "FOO", "USDT", rate=2.5)]

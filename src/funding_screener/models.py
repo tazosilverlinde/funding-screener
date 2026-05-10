@@ -163,6 +163,11 @@ class CombinedFundingRow(_Frozen):
     # (≤24h of 10-min snapshots, so up to ~144 points). Empty when fewer than
     # 2 samples available (≈20min after process start).
     score_history_chart: list[int] = []
+    # Hourly net liquidation values over the last 24h (oldest → newest, 24 bins).
+    # Positive = shorts dominated that hour (squeeze); negative = longs dominated
+    # (cascade). USD-denominated. Empty when the WS buffer has nothing for this
+    # symbol or no Binance side exists.
+    liq_net_hourly_chart: list[float] = []
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.

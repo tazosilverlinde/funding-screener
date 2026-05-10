@@ -58,6 +58,7 @@ def screen_combined_high_funding(
     enrichments: dict[tuple[str, str], EnrichmentData],
     threshold_percent: float,
     liq_stats_by_symbol: Optional[dict[str, dict]] = None,
+    liq_histogram_by_symbol: Optional[dict[str, list[dict]]] = None,
     binance_volumes: Optional[dict[str, float]] = None,
     mexc_volumes: Optional[dict[str, float]] = None,
     min_volume_usd_per_side: float = 0.0,
@@ -172,6 +173,20 @@ def screen_combined_high_funding(
         liq_long = liq_stats.get("long_liq_usd") if liq_stats else None
         liq_short = liq_stats.get("short_liq_usd") if liq_stats else None
 
+        # 24h hourly net-liquidation chart (Round 33). Net = short_liq - long_liq
+        # so positive bars are squeeze hours, negative bars are cascade hours.
+        liq_net_chart: list[float] = []
+        if liq_histogram_by_symbol and liq_lookup_sym:
+            hist_bins = liq_histogram_by_symbol.get(liq_lookup_sym) or []
+            if hist_bins and any(
+                (b.get("count", 0) or 0) > 0 for b in hist_bins
+            ):
+                liq_net_chart = [
+                    (b.get("short_liq_usd", 0.0) or 0.0)
+                    - (b.get("long_liq_usd", 0.0) or 0.0)
+                    for b in hist_bins
+                ]
+
         # Composite score uses every available input.
         composite = compute_composite_score(
             funding_8h_norm_pct=sig_funding,
@@ -260,6 +275,7 @@ def screen_combined_high_funding(
                 funding_deviation_classification=deviation.classification if deviation else None,
                 funding_history_chart=sparkline_history,
                 score_history_chart=score_chart,
+                liq_net_hourly_chart=liq_net_chart,
             )
         )
     out.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)
