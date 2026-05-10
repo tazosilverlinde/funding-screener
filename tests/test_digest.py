@@ -264,3 +264,76 @@ def test_compose_sector_rows_optional():
     digest = compose_daily_digest(combined_rows=[])
     assert "sector_winners" not in digest
     assert "sector_losers" not in digest
+
+
+# ---------------- Round 49: watchlist filter ----------------
+
+
+def test_compose_watchlist_filters_top_picks():
+    """When watchlist is set, top_longs/top_shorts only include matching bases."""
+    rows = [
+        _FakeRow("BTC", binance_symbol="BTCUSDT", composite_score=80,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+        _FakeRow("ETH", binance_symbol="ETHUSDT", composite_score=75,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+        _FakeRow("WIF", binance_symbol="WIFUSDT", composite_score=70,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+    ]
+    digest = compose_daily_digest(combined_rows=rows, watchlist={"BTC"})
+    assert {p["base"] for p in digest["top_longs"]} == {"BTC"}
+
+
+def test_compose_empty_watchlist_passes_all():
+    rows = [
+        _FakeRow("BTC", binance_symbol="BTCUSDT", composite_score=80,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+        _FakeRow("ETH", binance_symbol="ETHUSDT", composite_score=75,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+    ]
+    digest = compose_daily_digest(combined_rows=rows, watchlist=set())
+    assert {p["base"] for p in digest["top_longs"]} == {"BTC", "ETH"}
+
+
+def test_compose_none_watchlist_passes_all():
+    rows = [
+        _FakeRow("BTC", binance_symbol="BTCUSDT", composite_score=80,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+        _FakeRow("ETH", binance_symbol="ETHUSDT", composite_score=75,
+                 composite_emoji="🚀", composite_short="Strong bull"),
+    ]
+    digest = compose_daily_digest(combined_rows=rows, watchlist=None)
+    assert len(digest["top_longs"]) == 2
+
+
+def test_compose_watchlist_market_overview_uses_full_universe():
+    """market_overview is always computed across ALL rows, even with watchlist."""
+    rows = [
+        _FakeRow("BTC", composite_score=80),
+        _FakeRow("ETH", composite_score=75),
+        _FakeRow("SOL", composite_score=-80),
+        _FakeRow("WIF", composite_score=10),
+    ]
+    digest = compose_daily_digest(combined_rows=rows, watchlist={"BTC"})
+    # 4 total, despite watchlist of 1.
+    assert digest["market_overview"]["total_symbols"] == 4
+    assert digest["market_overview"]["bullish"] == 2  # BTC + ETH
+    assert digest["market_overview"]["bearish"] == 1  # SOL
+
+
+def test_compose_watchlist_filters_liq_squeezes_and_cascades():
+    rows = [_FakeRow("BTC", composite_score=80)]
+    liq_stats = {
+        "BTCUSDT": {
+            "long_liq_usd": 1_000_000, "short_liq_usd": 25_000_000,
+            "total_usd": 26_000_000, "events_count": 100,
+        },
+        "ETHUSDT": {
+            "long_liq_usd": 1_000_000, "short_liq_usd": 25_000_000,
+            "total_usd": 26_000_000, "events_count": 100,
+        },
+    }
+    digest = compose_daily_digest(
+        combined_rows=rows, liq_stats_by_symbol=liq_stats, watchlist={"BTC"},
+    )
+    # ETHUSDT should be filtered out (its base ETH isn't in watchlist).
+    assert {r["symbol"] for r in digest["top_squeezes"]} == {"BTCUSDT"}

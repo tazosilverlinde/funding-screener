@@ -1227,6 +1227,11 @@ async def _daily_digest_loop(
                 liq_stats_by_symbol=liq_stats,
             )
             sector_rows = _sector_aggregates(combined_rows)
+            # Reuse the alerts.yaml watchlist (Round 49) — when set, digest
+            # top picks come from the same curated list. Empty/missing →
+            # full universe, like before.
+            _alerts_cfg_for_digest = (load_alerts_config() or {}).get("alerts") or {}
+            digest_watchlist = parse_watchlist(_alerts_cfg_for_digest.get("watchlist"))
             digest = compose_daily_digest(
                 combined_rows=combined_rows,
                 liq_stats_by_symbol=liq_stats,
@@ -1234,6 +1239,7 @@ async def _daily_digest_loop(
                 unlock_events=_load_upcoming_unlocks(),
                 stablecoin_supply=store.read_stablecoin_supply(),
                 sector_rows=sector_rows,
+                watchlist=digest_watchlist,
                 top_n=top_n,
             )
             text_body = format_digest_as_text(digest, top_n=top_n)

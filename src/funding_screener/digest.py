@@ -172,6 +172,7 @@ def compose_daily_digest(
     unlock_events: Iterable | None = None,
     stablecoin_supply: dict | None = None,
     sector_rows: Iterable | None = None,
+    watchlist: set[str] | None = None,
     top_n: int = 5,
 ) -> dict:
     """Aggregate everything into one structured digest dict.
@@ -179,14 +180,46 @@ def compose_daily_digest(
     Every section is independently computable, so an empty input (e.g. no
     onchain flows yet) just produces an empty/None section instead of
     crashing the rest of the digest.
+
+    Watchlist (Round 49): when non-empty, top long/short picks and the
+    liquidation cascade/squeeze sections only include rows whose base asset
+    is in the set. Market overview, sector aggregates, whale highlight,
+    unlocks, and macro all see the FULL universe (those are aggregate /
+    schedule signals where filtering would distort the read).
     """
     rows_list = list(combined_rows)
+    watchlist = watchlist or set()
+    # Filter rows once for the per-symbol picks. Sections that need the
+    # whole universe (market_overview, sector_*) keep the unfiltered rows.
+    if watchlist:
+        watchlisted_rows = [
+            r for r in rows_list
+            if (getattr(r, "base_asset", "") or "").upper() in watchlist
+        ]
+    else:
+        watchlisted_rows = rows_list
+    # Same for liquidation stats — strip USDT/USDC/BUSD suffix and match base.
+    if watchlist and liq_stats_by_symbol:
+        filtered_liq: dict[str, dict] = {}
+        for sym, stats in liq_stats_by_symbol.items():
+            sym_u = (sym or "").upper()
+            for q in ("USDT", "USDC", "BUSD"):
+                if sym_u.endswith(q):
+                    if sym_u[: -len(q)] in watchlist:
+                        filtered_liq[sym] = stats
+                    break
+        liq_for_picks = filtered_liq
+    else:
+        liq_for_picks = liq_stats_by_symbol or {}
+
     digest = {
+        # market_overview always sees the full universe — it's a market-wide read.
         "market_overview": compose_market_overview(rows_list),
-        "top_longs": top_long_candidates(rows_list, top_n=top_n),
-        "top_shorts": top_short_candidates(rows_list, top_n=top_n),
-        "top_squeezes": top_liquidation_events(liq_stats_by_symbol or {}, side="short", top_n=top_n),
-        "top_cascades": top_liquidation_events(liq_stats_by_symbol or {}, side="long", top_n=top_n),
+        # Top picks honor the watchlist when set.
+        "top_longs": top_long_candidates(watchlisted_rows, top_n=top_n),
+        "top_shorts": top_short_candidates(watchlisted_rows, top_n=top_n),
+        "top_squeezes": top_liquidation_events(liq_for_picks, side="short", top_n=top_n),
+        "top_cascades": top_liquidation_events(liq_for_picks, side="long", top_n=top_n),
         "whale_highlight": _whale_spotlight(onchain_flows or []),
         "upcoming_unlocks": upcoming_unlocks(unlock_events or [], days_ahead=7, top_n=top_n),
         "macro": _macro_summary(stablecoin_supply or {}),
