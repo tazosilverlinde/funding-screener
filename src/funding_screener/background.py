@@ -800,8 +800,11 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
 
             async def _enrich_binance(row: FundingRow) -> Optional[EnrichmentData]:
                 async with sem:
+                    # 30 funding rates ≈ 10 days of history at the typical 8h
+                    # cadence — enough sample for compute_funding_deviation to
+                    # produce a stable z-score (default min_samples=10).
                     results = await asyncio.gather(
-                        binance.fetch_funding_rate_history(row.symbol, limit=4),
+                        binance.fetch_funding_rate_history(row.symbol, limit=30),
                         binance.fetch_open_interest_history(row.symbol, period="1h", limit=24),
                         binance.fetch_long_short_ratio_global(row.symbol, period="1h", limit=1),
                         binance.fetch_long_short_ratio_top(row.symbol, period="1h", limit=1),
@@ -834,7 +837,7 @@ async def _enrichment_loop(store: DataStore, binance: BinanceClient, mexc: MexcC
             async def _enrich_mexc(row: FundingRow) -> Optional[EnrichmentData]:
                 async with sem:
                     try:
-                        history = await mexc.fetch_funding_rate_history(row.symbol, limit=4)
+                        history = await mexc.fetch_funding_rate_history(row.symbol, limit=30)
                     except Exception:
                         history = []
                 count, direction = compute_funding_streak(history)

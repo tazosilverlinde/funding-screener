@@ -15,7 +15,12 @@ from datetime import datetime
 from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow, Kline
 from ..score_history import score_delta as _score_delta
 from ..sectors import sector_for
-from ..signals import classify_signal, compute_composite_score, compute_realized_volatility
+from ..signals import (
+    classify_signal,
+    compute_composite_score,
+    compute_funding_deviation,
+    compute_realized_volatility,
+)
 
 _QUOTES = ("USDT", "USDC")
 
@@ -132,6 +137,19 @@ def screen_combined_high_funding(
             mark_index_spread_pct=sig_spread,
         )
 
+        # Funding deviation: z-score of current rate vs ~30-period history.
+        # Use whichever side drove the signal so the deviation aligns with it.
+        if abs(b_norm or 0.0) >= abs(m_norm or 0.0):
+            sided_history = (b_enr.prev_funding_rates_percent if b_enr else []) or []
+            sided_current = b.rate_percent if b else None
+        else:
+            sided_history = (m_enr.prev_funding_rates_percent if m_enr else []) or []
+            sided_current = m.rate_percent if m else None
+        deviation = compute_funding_deviation(sided_current, sided_history)
+        dev_label: Optional[str] = None
+        if deviation:
+            dev_label = f"{deviation.emoji} {deviation.z_score:+.1f}σ"
+
         # Composite score uses every available input.
         composite = compute_composite_score(
             funding_8h_norm_pct=sig_funding,
@@ -201,6 +219,9 @@ def screen_combined_high_funding(
                 ),
                 realized_vol_30d_pct=vol_30d,
                 funding_per_vol=funding_per_vol,
+                funding_deviation_z=deviation.z_score if deviation else None,
+                funding_deviation_label=dev_label,
+                funding_deviation_classification=deviation.classification if deviation else None,
             )
         )
     out.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)

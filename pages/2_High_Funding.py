@@ -105,6 +105,8 @@ df = to_df(
         "composite_short",
         "signal_emoji",
         "signal_short",
+        "funding_deviation_label",
+        "funding_deviation_z",
         "base_asset",
         "quote_asset",
         "sector",
@@ -147,8 +149,12 @@ if not df.empty:
     # Combine emoji + short label into one cell for compact display.
     df["Signal"] = df["signal_emoji"].fillna("") + " " + df["signal_short"].fillna("")
     df = df.drop(columns=["signal_emoji", "signal_short"])
-    # Move Score / Δ / Signal to the front.
-    front = ["Score", "Δ 1h", "Score label", "Signal"]
+    # Funding deviation label + numeric z-score (Round 12).
+    df["Dev"] = df["funding_deviation_label"].fillna("")
+    df["Dev z"] = df["funding_deviation_z"]
+    df = df.drop(columns=["funding_deviation_label", "funding_deviation_z"])
+    # Move Score / Δ / Signal / Dev to the front.
+    front = ["Score", "Δ 1h", "Score label", "Signal", "Dev", "Dev z"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -242,6 +248,29 @@ if not df.empty:
                 "📉 Persistent bear — 3+ consecutive positive-funding periods, longs over-leveraged\n"
                 "🟡 Neutral — funding within normal band\n"
                 "⚠️ Risk — mark vs index diverged > 0.5%, possible liquidation cascade or manipulation"
+            ),
+        ),
+        "Dev": st.column_config.TextColumn(
+            "Dev",
+            help=(
+                "Funding-rate deviation: z-score of the current rate vs the last "
+                "~30 settled rates (≈10 days at 8h cadence).\n\n"
+                "🔥 z > +2.5σ — extreme overshoot, **mean-revert candidate**\n"
+                "📈 z > +1.5σ — running hot, watch for cooldown\n"
+                "🟢 |z| ≤ 1.5σ — persistent regime (no anomaly)\n"
+                "📉 z < −1.5σ — running cool, watch for warm-up\n"
+                "❄ z < −2.5σ — extreme undershoot, **mean-revert candidate**\n\n"
+                "Empty when fewer than 10 historical rates available, or "
+                "when std is zero (degenerate)."
+            ),
+        ),
+        "Dev z": st.column_config.NumberColumn(
+            "Dev z",
+            format="%+.1fσ",
+            help=(
+                "Numeric z-score of the funding-deviation column above. Sortable: "
+                "ascending shows undershoot extremes (squeeze candidates); "
+                "descending shows overshoot extremes (cooldown candidates)."
             ),
         ),
         "Base": st.column_config.TextColumn(

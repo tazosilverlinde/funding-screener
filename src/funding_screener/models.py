@@ -146,6 +146,13 @@ class CombinedFundingRow(_Frozen):
     # None when fewer than 2 history samples or drift > 50% off target.
     composite_score_delta_1h: Optional[int] = None
 
+    # Funding-rate deviation: z-score of current rate vs ~30-period history.
+    # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.
+    # None when history < 10 samples (not enough to compute std reliably).
+    funding_deviation_z: Optional[float] = None
+    funding_deviation_label: Optional[str] = None  # display string, e.g. "🔥 +3.2σ"
+    funding_deviation_classification: Optional[str] = None  # bucket name from FundingDeviation
+
 
 class PriceRiseRow(_Frozen):
     """Output row for the close-to-close price-rise screener."""

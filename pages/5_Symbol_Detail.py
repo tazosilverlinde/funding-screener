@@ -32,7 +32,11 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from funding_screener.exchanges import BinanceClient, MexcClient  # noqa: E402
-from funding_screener.signals import classify_signal, compute_composite_score  # noqa: E402
+from funding_screener.signals import (  # noqa: E402
+    classify_signal,
+    compute_composite_score,
+    compute_funding_deviation,
+)
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
@@ -312,6 +316,22 @@ if funding_row:
             }
         )
         st.dataframe(hist_df, hide_index=True, use_container_width=False)
+
+    # Funding-rate deviation indicator — surfaces fresh anomalies vs the
+    # 30-period mean. Computed only when we have ≥10 historical settlements.
+    if funding_history_pct and funding_row:
+        deviation = compute_funding_deviation(
+            current_pct=funding_row.rate_percent,
+            history_pct=funding_history_pct,
+        )
+        if deviation:
+            box_text = f"**{deviation.emoji} Funding deviation:** {deviation.comment}"
+            if deviation.classification in ("extreme_overshoot", "extreme_undershoot"):
+                st.warning(box_text)
+            elif deviation.classification in ("overshoot", "undershoot"):
+                st.info(box_text)
+            else:
+                st.markdown(box_text)
 
     # Explanation
     f_pct = funding_row.rate_8h_norm_percent

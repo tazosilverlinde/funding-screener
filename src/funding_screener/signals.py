@@ -325,6 +325,101 @@ def compute_realized_volatility(klines: list, days: int = 30) -> Optional[float]
     return sigma * math.sqrt(365) * 100.0
 
 
+@dataclass(frozen=True)
+class FundingDeviation:
+    """Tells the user whether current funding is unusual vs recent history.
+
+    `z_score` is the classic (current − mean) / std using the recent settled
+    rates, which lets us answer "is this rate persistent (mean ≈ current,
+    z ≈ 0) or a fresh spike (z >> 0)?" The classification bucket and verbal
+    comment are derived once here so every page surfaces the same wording.
+
+    Caveats: with fewer than 10 historical samples the std is unstable so we
+    bail out and return None — better no signal than misleading one.
+    """
+    current_pct: float
+    mean_pct: float
+    std_pct: float
+    z_score: float
+    classification: str   # "extreme_overshoot" | "overshoot" | "normal" | "undershoot" | "extreme_undershoot"
+    emoji: str
+    comment: str          # human-readable, e.g. "current funding 2.3σ above 30-period mean — mean-revert candidate"
+
+
+def compute_funding_deviation(
+    current_pct: Optional[float],
+    history_pct: list[float],
+    min_samples: int = 10,
+) -> Optional[FundingDeviation]:
+    """Z-score of `current_pct` against the recent settled rates.
+
+    Returns None when:
+      - current is missing
+      - history has fewer than `min_samples` entries
+      - std of history is zero (all rates identical — degenerate)
+
+    Classification thresholds are deliberately wider than typical (±1.5 / ±2.5
+    rather than ±1.0 / ±2.0): funding rates have fat tails, and we want only
+    *meaningful* deviations to trip the alert label so the signal stays useful.
+    """
+    import statistics
+
+    if current_pct is None:
+        return None
+    if not history_pct or len(history_pct) < min_samples:
+        return None
+    try:
+        mean = statistics.mean(history_pct)
+        std = statistics.stdev(history_pct) if len(history_pct) >= 2 else 0.0
+    except statistics.StatisticsError:
+        return None
+    if std == 0.0:
+        return None
+
+    z = (current_pct - mean) / std
+
+    if z >= 2.5:
+        cls, emoji = "extreme_overshoot", "🔥"
+        comment = (
+            f"Current funding {z:+.1f}σ above {len(history_pct)}-period mean "
+            f"({mean:+.4f}% avg) — extreme overshoot, mean-revert candidate"
+        )
+    elif z >= 1.5:
+        cls, emoji = "overshoot", "📈"
+        comment = (
+            f"Current funding {z:+.1f}σ above {len(history_pct)}-period mean "
+            f"({mean:+.4f}% avg) — running hot, watch for cooldown"
+        )
+    elif z <= -2.5:
+        cls, emoji = "extreme_undershoot", "❄"
+        comment = (
+            f"Current funding {z:+.1f}σ below {len(history_pct)}-period mean "
+            f"({mean:+.4f}% avg) — extreme undershoot, mean-revert candidate"
+        )
+    elif z <= -1.5:
+        cls, emoji = "undershoot", "📉"
+        comment = (
+            f"Current funding {z:+.1f}σ below {len(history_pct)}-period mean "
+            f"({mean:+.4f}% avg) — running cool, watch for warm-up"
+        )
+    else:
+        cls, emoji = "normal", "🟢"
+        comment = (
+            f"Current funding within ±1.5σ ({z:+.1f}σ) of "
+            f"{len(history_pct)}-period mean ({mean:+.4f}% avg) — persistent regime"
+        )
+
+    return FundingDeviation(
+        current_pct=current_pct,
+        mean_pct=mean,
+        std_pct=std,
+        z_score=z,
+        classification=cls,
+        emoji=emoji,
+        comment=comment,
+    )
+
+
 def _composite_label(score: int) -> tuple[str, str, str]:
     """Map score → (emoji, short label, color). Symmetric around zero."""
     if score >= 70:
