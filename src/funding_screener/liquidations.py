@@ -164,6 +164,64 @@ class LiquidationsBuffer:
             out[symbol] = _aggregate_deque(dq)
         return out
 
+    def histogram(
+        self,
+        symbol: str,
+        bin_seconds: int = 3600,
+        window_seconds: Optional[int] = None,
+    ) -> list[dict]:
+        """Per-bin long/short totals for one symbol — drives the Page 5 chart.
+
+        Each output dict has:
+            ts            — UTC unix-seconds timestamp at the START of the bin
+            long_liq_usd  — sum of LONG-side liquidations in the bin
+            short_liq_usd — same for shorts
+            count         — total events in the bin
+
+        Bins are walltime-aligned (bin_start = floor(now/bin_seconds) - i*bin_seconds)
+        so the rightmost bin is "current hour" rather than "1h ending exactly
+        now". Empty bins are emitted with zero values — the chart needs a
+        contiguous x-axis.
+        """
+        window = window_seconds or self._window
+        cutoff = time.time() - window
+        dq = self._buf.get(symbol)
+        if not dq:
+            # Still emit empty bins so the chart has consistent x-axis.
+            n_bins = max(1, window // bin_seconds)
+            now_floor = (int(time.time()) // bin_seconds) * bin_seconds
+            return [
+                {"ts": now_floor - i * bin_seconds, "long_liq_usd": 0.0,
+                 "short_liq_usd": 0.0, "count": 0}
+                for i in range(n_bins - 1, -1, -1)
+            ]
+        self._prune(dq, cutoff)
+        n_bins = max(1, window // bin_seconds)
+        now_floor = (int(time.time()) // bin_seconds) * bin_seconds
+        oldest_bin_start = now_floor - (n_bins - 1) * bin_seconds
+        bins: dict[int, dict] = {
+            (oldest_bin_start + i * bin_seconds): {
+                "ts": oldest_bin_start + i * bin_seconds,
+                "long_liq_usd": 0.0,
+                "short_liq_usd": 0.0,
+                "count": 0,
+            }
+            for i in range(n_bins)
+        }
+        for ev in dq:
+            if ev.timestamp < oldest_bin_start:
+                continue
+            bin_start = (int(ev.timestamp) // bin_seconds) * bin_seconds
+            slot = bins.get(bin_start)
+            if slot is None:
+                continue  # event timestamp outside our bin range — skip
+            if ev.side_liquidated == "long":
+                slot["long_liq_usd"] += ev.notional_usd
+            else:
+                slot["short_liq_usd"] += ev.notional_usd
+            slot["count"] += 1
+        return [bins[k] for k in sorted(bins.keys())]
+
     def total_events_seen(self) -> int:
         """Lifetime count since process start — used for health/debug."""
         return self._total_events_seen

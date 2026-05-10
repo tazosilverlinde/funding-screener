@@ -281,6 +281,12 @@ class DataStore:
             "last_event_at": self.liquidations.last_event_at(),
         }
 
+    def read_liquidations_histogram(
+        self, symbol: str, bin_seconds: int = 3600, window_seconds: int = 24 * 3600,
+    ) -> list[dict]:
+        """Per-bin {ts, long_liq_usd, short_liq_usd, count} for one symbol."""
+        return self.liquidations.histogram(symbol, bin_seconds, window_seconds)
+
     # ---- readers (thread-safe; called from Streamlit page renders) ----
 
     def read_binance(self) -> ExchangeSnapshot:

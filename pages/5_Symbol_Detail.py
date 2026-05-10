@@ -559,6 +559,24 @@ if exchange == "Binance":
             help="Largest single liquidation event in the window. "
                  "Outsized values often signal one large fund getting blown out.",
         )
+        # ── 24h hourly histogram chart — added Round 18 ─────────────────────
+        hist = store.read_liquidations_histogram(symbol_q, bin_seconds=3600, window_seconds=24 * 3600)
+        if hist:
+            from datetime import datetime as _dt, timezone as _tz
+            hist_df = pd.DataFrame(
+                {
+                    "Long $": [(b["long_liq_usd"] / 1e6) for b in hist],
+                    "Short $": [(b["short_liq_usd"] / 1e6) for b in hist],
+                },
+                index=pd.to_datetime([_dt.fromtimestamp(b["ts"], tz=_tz.utc) for b in hist]),
+            )
+            st.bar_chart(hist_df, height=220, color=["#ff4b4b", "#21ba45"])
+            st.caption(
+                "Hourly bars. Red = LONG positions liquidated (precedes / accompanies "
+                "drops). Green = SHORT positions liquidated (squeezes). "
+                "When one color dominates a recent bar that aligns with the score's "
+                "liquidation contribution above."
+            )
 else:
     st.info(
         "MEXC's public API doesn't expose mark/index spread, OI history, or L/S ratio for individual contracts. "
