@@ -250,3 +250,29 @@ def compose_trade_thesis(
         "bearish_reasons": bearish,
         "risks": risks,
     }
+
+
+def format_thesis_for_telegram(thesis: dict, max_reasons_per_section: int = 4) -> str:
+    """Format a thesis dict as compact Markdown for Telegram alert payloads.
+
+    Telegram messages cap at 4096 chars; the alerts loop already prepends a
+    headline line, so we keep this body terse — at most `max_reasons_per_section`
+    bullet points per section. Sections with zero entries are omitted entirely.
+
+    Returns an empty string when the thesis has no reasons or risks at all
+    (rather than emitting empty headers). Caller can `if format_thesis_for_telegram(...)`
+    as a truthy guard.
+    """
+    sections: list[str] = []
+    bullish = (thesis.get("bullish_reasons") or [])[:max_reasons_per_section]
+    bearish = (thesis.get("bearish_reasons") or [])[:max_reasons_per_section]
+    risks = (thesis.get("risks") or [])[:max_reasons_per_section]
+
+    if bullish:
+        sections.append("*🟢 Bullish reasons:*\n" + "\n".join(f"• {r}" for r in bullish))
+    if bearish:
+        sections.append("*🔴 Bearish reasons:*\n" + "\n".join(f"• {r}" for r in bearish))
+    if risks:
+        sections.append("*⚠️ Risks:*\n" + "\n".join(f"• {r}" for r in risks))
+
+    return "\n\n".join(sections)

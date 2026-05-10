@@ -275,27 +275,48 @@ def evaluate_funding_alerts(funding_rows, threshold_pct: float) -> list[tuple[st
 
 
 def evaluate_composite_alerts(combined_rows, bull_threshold: int, bear_threshold: int) -> list[tuple[str, str, str]]:
+    """Composite-score alert evaluator. Round 38: now embeds the auto-thesis in
+    the message body so users get the bull/bear/risk breakdown via Telegram
+    without having to open the app.
+
+    The thesis is computed inline from the row's already-attached fields — no
+    extra fetches. Pure-function call so this stays fast.
+    """
+    # Local import keeps the alerts module's load path lean (thesis isn't
+    # needed for any other evaluator).
+    from .thesis import compose_trade_thesis, format_thesis_for_telegram
+
     out: list[tuple[str, str, str]] = []
     for r in combined_rows:
         if r.composite_score is None:
             continue
         key = f"composite:{r.base_asset}/{r.quote_asset}"
         score = r.composite_score
-        if score >= bull_threshold:
+        if score >= bull_threshold or score <= bear_threshold:
             sym = r.binance_symbol or r.mexc_symbol or r.base_asset
-            msg = (
-                f"🚀 *{sym}* — composite score `{score:+d}`\n"
-                f"{r.composite_emoji} {r.composite_short}\n"
-                f"```\n{r.composite_breakdown}\n```"
+            head_emoji = "🚀" if score >= bull_threshold else "💥"
+            # Build the thesis from row inputs. Fields not on the row default
+            # to None inside compose_trade_thesis, which silently skips them.
+            thesis = compose_trade_thesis(
+                symbol=sym,
+                composite_score=score,
+                funding_8h_norm_pct=getattr(r, "binance_rate_8h_norm_percent", None)
+                                    or getattr(r, "mexc_rate_8h_norm_percent", None),
+                mark_index_spread_pct=getattr(r, "binance_mark_index_spread_percent", None),
+                oi_change_24h_pct=getattr(r, "binance_oi_change_24h_pct", None),
+                ls_ratio_global=getattr(r, "binance_ls_ratio_global", None),
+                ls_ratio_top=getattr(r, "binance_ls_ratio_top", None),
+                funding_deviation_z=getattr(r, "funding_deviation_z", None),
+                signal_age_hours=getattr(r, "signal_age_hours", None),
+                score_stddev_24h=getattr(r, "composite_score_stddev_24h", None),
+                setup_quality_label=getattr(r, "setup_quality_label", None),
             )
-            out.append((key, "active", msg))
-        elif score <= bear_threshold:
-            sym = r.binance_symbol or r.mexc_symbol or r.base_asset
-            msg = (
-                f"💥 *{sym}* — composite score `{score:+d}`\n"
-                f"{r.composite_emoji} {r.composite_short}\n"
-                f"```\n{r.composite_breakdown}\n```"
+            thesis_block = format_thesis_for_telegram(thesis)
+            header = (
+                f"{head_emoji} *{sym}* — composite score `{score:+d}`\n"
+                f"{r.composite_emoji} {r.composite_short}"
             )
+            msg = header + (f"\n\n{thesis_block}" if thesis_block else "")
             out.append((key, "active", msg))
         else:
             out.append((key, "resolved", f"📉 {r.base_asset}/{r.quote_asset} composite score back to {score:+d}."))
