@@ -160,6 +160,7 @@ df = to_df(
         "funding_deviation_label",
         "funding_deviation_z",
         "funding_history_chart",
+        "score_history_chart",
         "base_asset",
         "quote_asset",
         "sector",
@@ -211,15 +212,20 @@ if not df.empty:
     df = df.drop(columns=["funding_deviation_label", "funding_deviation_z"])
     # Funding history sparkline (Round 31). Streamlit renders list-typed
     # cells as inline mini line charts via column_config.LineChartColumn.
-    df["Trend"] = df["funding_history_chart"].apply(
+    df["Funding"] = df["funding_history_chart"].apply(
         lambda v: v if isinstance(v, list) and v else None
     )
     df = df.drop(columns=["funding_history_chart"])
+    # Composite score history sparkline (Round 32). Same pattern, different series.
+    df["Score trend"] = df["score_history_chart"].apply(
+        lambda v: v if isinstance(v, list) and v else None
+    )
+    df = df.drop(columns=["score_history_chart"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / σ / Age / Signal / Dev / Trend / Liq to the front.
-    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score label", "Signal",
-             "Dev", "Dev z", "Trend", "Liq 24h"]
+    # Move Score / Δ / σ / Age / Score-trend / Signal / Dev / Funding / Liq to the front.
+    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score trend", "Score label",
+             "Signal", "Dev", "Dev z", "Funding", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -366,8 +372,8 @@ if not df.empty:
                 "descending shows overshoot extremes (cooldown candidates)."
             ),
         ),
-        "Trend": st.column_config.LineChartColumn(
-            "Trend",
+        "Funding": st.column_config.LineChartColumn(
+            "Funding",
             help=(
                 "Inline sparkline of the last ~30 settled funding rates "
                 "(≈10 days at 8h cadence) for the side that drove the signal. "
@@ -377,6 +383,20 @@ if not df.empty:
                 "  • Recently flipped sign → regime change just happened\n"
                 "  • Persistently one-sided → sustained pressure (carry candidate)\n"
                 "  • Spiking up at the right edge → fresh acceleration"
+            ),
+            width="small",
+        ),
+        "Score trend": st.column_config.LineChartColumn(
+            "Score trend",
+            help=(
+                "Inline sparkline of the composite score over the last ≤24h "
+                "(snapshots every 10 min, so up to ~144 points). Y-scale "
+                "auto-fits per row.\n\n"
+                "What you're looking for:\n"
+                "  • Trending up at the right edge → setup building\n"
+                "  • Flat at the top                → mature, possibly priced in\n"
+                "  • Volatile / sawtooth            → unstable signal (cross-ref σ 24h)\n"
+                "  • Trending down                  → conviction draining"
             ),
             width="small",
         ),

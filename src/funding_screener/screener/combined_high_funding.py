@@ -153,6 +153,10 @@ def screen_combined_high_funding(
         # API returns rates most-recent first; reverse for the sparkline so the
         # x-axis reads oldest→newest.
         sparkline_history = list(reversed(sided_history)) if sided_history else []
+        # Composite-score history sparkline (Round 32). score_histories already
+        # stores chronologically — strip timestamps for the chart.
+        _score_samples = score_histories.get((base, quote)) or []
+        score_chart = [int(s) for _ts, s in _score_samples] if len(_score_samples) >= 2 else []
         deviation = compute_funding_deviation(sided_current, sided_history)
         dev_label: Optional[str] = None
         if deviation:
@@ -255,6 +259,7 @@ def screen_combined_high_funding(
                 funding_deviation_label=dev_label,
                 funding_deviation_classification=deviation.classification if deviation else None,
                 funding_history_chart=sparkline_history,
+                score_history_chart=score_chart,
             )
         )
     out.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)

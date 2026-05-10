@@ -159,6 +159,10 @@ class CombinedFundingRow(_Frozen):
     # Empty list when neither exchange has enrichment data yet. Used by the
     # Page-2 sparkline column.
     funding_history_chart: list[float] = []
+    # Composite-score samples (oldest → newest) over the score-history window
+    # (≤24h of 10-min snapshots, so up to ~144 points). Empty when fewer than
+    # 2 samples available (≈20min after process start).
+    score_history_chart: list[int] = []
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.

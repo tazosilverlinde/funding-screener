@@ -142,6 +142,40 @@ def test_combined_high_funding_empty_history_when_no_enrichment():
         bnb, [], bnb_c, [], {}, threshold_percent=1.0,
     )
     assert out[0].funding_history_chart == []
+    assert out[0].score_history_chart == []
+
+
+def test_combined_high_funding_score_history_chart_populated():
+    """Score history sparkline pulls from the score_histories arg."""
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    base_ts = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
+    histories = {
+        ("BTC", "USDT"): [
+            (base_ts - timedelta(minutes=30), 20),
+            (base_ts - timedelta(minutes=20), 35),
+            (base_ts - timedelta(minutes=10), 50),
+            (base_ts, 60),
+        ],
+    }
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        score_histories=histories,
+    )
+    assert out[0].score_history_chart == [20, 35, 50, 60]
+
+
+def test_combined_high_funding_score_chart_empty_for_single_sample():
+    """Score sparkline needs ≥2 samples; one-shot histories produce empty."""
+    bnb = [_funding("Binance", "BTCUSDT", "BTC", "USDT", rate=1.5)]
+    bnb_c = [_contract("Binance", "BTCUSDT", "BTC", "USDT", maker=0.02)]
+    base_ts = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
+    histories = {("BTC", "USDT"): [(base_ts, 60)]}
+    out = screen_combined_high_funding(
+        bnb, [], bnb_c, [], {}, threshold_percent=1.0,
+        score_histories=histories,
+    )
+    assert out[0].score_history_chart == []
 
 
 def test_combined_high_funding_only_one_side():
