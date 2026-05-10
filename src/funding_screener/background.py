@@ -32,6 +32,7 @@ from .digest import (
     format_digest_as_text,
 )
 from .notifications import (
+    AlertLog,
     AlertState,
     EmailClient,
     TelegramClient,
@@ -105,6 +106,11 @@ class DataStore:
         # from any thread because the underlying deques only mutate via the WS
         # task (single producer) and reads run during page render.
         self.liquidations = LiquidationsBuffer()
+        # Bounded in-memory audit log of every alert fire. Survives across
+        # alert-loop iterations so users can see what fired in the last few
+        # hours without scrolling Telegram. Wiped on process restart — same
+        # tradeoff as score_history.
+        self.alert_log = AlertLog()
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -587,17 +593,23 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 events.extend(evaluate_unlock_alerts(upcoming, days))
 
             # Apply state machine: fire only on off→on transitions, send "resolved"
-            # only for previously-active keys.
+            # only for previously-active keys. Each successful fire is recorded
+            # to store.alert_log so the audit page can render the history even
+            # for users who don't have Telegram configured.
             for key, status, msg in events:
                 if status == "active":
                     if state.should_fire(key, cooldown_s):
                         ok = await telegram.send(msg)
                         if ok:
                             state.mark_fired(key)
+                        delivered = ("telegram",) if (ok and telegram.is_configured()) else ()
+                        store.alert_log.record(key, status, msg, delivered)
                 elif status == "resolved":
                     if key in state.active_keys:
-                        await telegram.send(msg)
+                        ok = await telegram.send(msg)
                         state.mark_resolved(key)
+                        delivered = ("telegram",) if (ok and telegram.is_configured()) else ()
+                        store.alert_log.record(key, status, msg, delivered)
 
         except Exception as e:
             log.exception("alerts loop error")

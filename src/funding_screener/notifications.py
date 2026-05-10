@@ -66,6 +66,70 @@ class AlertState:
         self.active_keys.discard(key)
 
 
+@dataclass(frozen=True)
+class AlertFireRecord:
+    """One row in the audit log — what fired, when, where, and to whom.
+
+    `kind` derives from the alert key prefix (e.g. "composite", "liq_cascade",
+    "funding_dev:over"). `delivered_to` lists which channels actually accepted
+    the message (Telegram, email digest, etc.) — empty list means evaluator
+    fired but every channel was unconfigured / errored.
+    """
+    fired_at: float                 # unix seconds
+    key: str                        # full alert key (e.g. "composite:BTC/USDT")
+    kind: str                       # category derived from key prefix
+    status: str                     # "active" | "resolved"
+    message: str
+    delivered_to: tuple[str, ...]   # ("telegram",) etc.
+
+
+class AlertLog:
+    """Bounded in-memory audit log of alert fires.
+
+    Producer: the alerts loop calls record() after a successful (or attempted)
+    send. Consumer: the new audit-log page reads recent() to render history.
+    Bounded at `max_entries` (default 500) — far more than a user reads, but
+    cheap memory-wise and gives a meaningful 24-72h tail of activity.
+    """
+
+    def __init__(self, max_entries: int = 500) -> None:
+        self._max = max_entries
+        self._buf: list[AlertFireRecord] = []
+
+    def record(
+        self, key: str, status: str, message: str, delivered_to: tuple[str, ...] = (),
+    ) -> None:
+        kind = key.split(":", 1)[0] if ":" in key else key
+        self._buf.append(AlertFireRecord(
+            fired_at=time.time(),
+            key=key,
+            kind=kind,
+            status=status,
+            message=message,
+            delivered_to=delivered_to,
+        ))
+        # Trim oldest when over cap. List append + slice is O(N) but N≤500 so it's fine.
+        if len(self._buf) > self._max:
+            self._buf = self._buf[-self._max:]
+
+    def recent(self, limit: int = 50, kind: Optional[str] = None) -> list[AlertFireRecord]:
+        """Return the most recent entries (newest first). Optionally filter by kind."""
+        items = list(reversed(self._buf))
+        if kind:
+            items = [e for e in items if e.kind == kind]
+        return items[:limit]
+
+    def kinds(self) -> list[str]:
+        """Distinct kinds currently in the log — used to populate filter UI."""
+        seen: dict[str, None] = {}
+        for e in self._buf:
+            seen[e.kind] = None
+        return list(seen.keys())
+
+    def __len__(self) -> int:
+        return len(self._buf)
+
+
 class TelegramClient:
     """Minimal Telegram Bot API client. Idempotent setup; safe to construct
     even when env vars aren't set (calls become no-ops)."""
