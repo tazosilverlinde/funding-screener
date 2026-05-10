@@ -354,6 +354,47 @@ def compute_realized_volatility(klines: list, days: int = 30) -> Optional[float]
     return sigma * math.sqrt(365) * 100.0
 
 
+def estimate_funding_income(
+    rate_8h_norm_pct: Optional[float],
+    position_usd: float,
+    hold_hours: float = 24.0,
+    direction: str = "long",
+) -> Optional[float]:
+    """Concrete-dollar estimate of funding paid/received over a holding period.
+
+    Funding mechanics: a positive rate means LONGS pay SHORTS at each settlement.
+    So holding a long position with positive funding => negative cash flow for
+    you; shorts with positive funding receive. We sign the result so positive
+    = you collect, negative = you pay.
+
+    Args:
+        rate_8h_norm_pct: 8h-normalized funding rate, in percent (e.g. 0.01 = 0.01%)
+        position_usd:    notional position size in USD
+        hold_hours:      planned holding period
+        direction:       "long" or "short" — flips the sign
+
+    Returns:
+        Signed USD amount over `hold_hours`. None if rate or position invalid.
+
+    Example:
+        rate_8h_norm = -0.5%, $10K long, 24h hold:
+            8h_periods = 24/8 = 3
+            per-period: -0.5% × $10K = -$50 (longs would PAY -$50, i.e. RECEIVE $50)
+            24h: 3 × $50 = $150 collected
+    """
+    if rate_8h_norm_pct is None or position_usd <= 0 or hold_hours <= 0:
+        return None
+    if direction not in ("long", "short"):
+        raise ValueError("direction must be 'long' or 'short'")
+    n_periods = hold_hours / 8.0
+    # Convert percent to decimal: 0.5% → 0.005.
+    per_period_usd = (rate_8h_norm_pct / 100.0) * position_usd
+    # Positive rate × long = long PAYS = negative cash flow for the user.
+    # Positive rate × short = short RECEIVES = positive cash flow.
+    sign = -1.0 if direction == "long" else 1.0
+    return sign * per_period_usd * n_periods
+
+
 @dataclass(frozen=True)
 class FundingDeviation:
     """Tells the user whether current funding is unusual vs recent history.

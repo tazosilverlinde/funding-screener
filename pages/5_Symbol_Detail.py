@@ -36,6 +36,7 @@ from funding_screener.signals import (  # noqa: E402
     classify_signal,
     compute_composite_score,
     compute_funding_deviation,
+    estimate_funding_income,
 )
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
@@ -243,6 +244,34 @@ with st.expander(f"Composite score breakdown ({composite.score:+d} {composite.em
     for line in composite.breakdown:
         st.write(f"• {line}")
 
+# ── Score history chart (Round 26) ─────────────────────────────────────────
+# Shows how the composite score has evolved for this pair over the last 24h.
+# A score that's been climbing is a different signal than one that's been at
+# the same level all day — momentum tells you whether you're catching the
+# move at the start or chasing it.
+quote_for_history = funding_row.quote_asset if funding_row else (contract.quote_asset if contract else "USDT")
+score_history = store.read_score_history((base_asset, quote_for_history))
+if len(score_history) >= 2:
+    history_df = pd.DataFrame(
+        {"Score": [s for _ts, s in score_history]},
+        index=pd.to_datetime([ts for ts, _s in score_history]),
+    )
+    st.write(f"**Composite score history — last {len(score_history)} samples**")
+    st.line_chart(history_df, height=180)
+    first_score = score_history[0][1]
+    latest_score = score_history[-1][1]
+    drift = latest_score - first_score
+    delta_label = "rising" if drift > 5 else ("falling" if drift < -5 else "flat")
+    st.caption(
+        f"Sampled every 10 min since the score-history loop kicked in. "
+        f"Trend: **{delta_label}** ({first_score:+d} → {latest_score:+d}, Δ {drift:+d})."
+    )
+elif score_history:
+    st.caption(
+        f"Score history is just initializing — only {len(score_history)} sample(s) so far. "
+        "Snapshots are taken every 10 min; come back in a bit."
+    )
+
 st.divider()
 
 
@@ -284,6 +313,51 @@ if funding_row:
         )
     else:
         f5.metric("Streak", "pending", help="Waiting for enrichment loop to fetch funding history…")
+
+    # ── Funding income estimator (Round 26) ────────────────────────────────
+    # Translates the funding percent into a concrete-dollar 24h cash flow for
+    # the user's chosen position size. Helps answer "is the funding actually
+    # worth taking the trade for, or is the spread too small relative to fees?"
+    with st.expander("💰 Funding income estimator", expanded=False):
+        est_c1, est_c2 = st.columns([1, 1])
+        position_size_usd = est_c1.number_input(
+            "Position size (USD)",
+            min_value=100.0, max_value=10_000_000.0, value=10_000.0, step=1000.0,
+            help="Notional value of the position you'd open. Fees not included.",
+        )
+        side_choice = est_c2.radio(
+            "Direction",
+            options=["long", "short"],
+            horizontal=True,
+            help="Pick the side. Long pays positive funding, receives negative; "
+                 "short is the opposite.",
+        )
+        long_24h = estimate_funding_income(
+            funding_row.rate_8h_norm_percent, position_size_usd, hold_hours=24.0,
+            direction=side_choice,
+        )
+        long_8h = estimate_funding_income(
+            funding_row.rate_8h_norm_percent, position_size_usd, hold_hours=8.0,
+            direction=side_choice,
+        )
+        if long_24h is not None and long_8h is not None:
+            est_c3, est_c4 = st.columns(2)
+            label_8h = "Receive" if long_8h >= 0 else "Pay"
+            label_24h = "Receive" if long_24h >= 0 else "Pay"
+            est_c3.metric(
+                f"{label_8h} per 8h",
+                f"${abs(long_8h):,.2f}",
+                help="Per-funding-period dollar amount based on the current rate. "
+                     "Positive = you collect; negative = you pay.",
+            )
+            est_c4.metric(
+                f"{label_24h} per 24h",
+                f"${abs(long_24h):,.2f}",
+                f"{(long_24h / position_size_usd) * 100:+.4f}% of position",
+                help="24h cash flow assuming three settlements at the current rate. "
+                     "Real-world the rate changes between settlements, so treat as "
+                     "a snapshot estimate.",
+            )
 
     # 30-day funding history line chart (replaces the small last-3-rates table).
     if funding_history_pct:
