@@ -58,6 +58,16 @@ alerts:
     threshold: 30          # alert when |avg_score| >= this
     min_token_count: 3     # require at least N tokens in the sector
 
+  # Alert summary digest (Round 50) — sends ONE batched Telegram message
+  # every `interval_minutes` summarizing every alert that fired since the
+  # previous summary, grouped by kind. Complementary to per-event firing
+  # (both can be on); useful as a quieter mode when per-event is too chatty.
+  # Disabled by default — opt in by flipping enabled to true.
+  summary_digest:
+    enabled: false
+    interval_minutes: 30
+    max_per_kind: 5         # cap symbols listed per kind in the summary
+
   # Funding-rate deviation — fires when current funding is z >= threshold
   # away from its ~30-period mean. Mean-revert candidates: extreme overshoot
   # often precedes a cooldown; extreme undershoot precedes a squeeze.

@@ -274,6 +274,53 @@ def evaluate_funding_alerts(funding_rows, threshold_pct: float) -> list[tuple[st
     return out
 
 
+def format_alert_summary_digest(
+    fire_records: list,
+    interval_minutes: int,
+    max_per_kind: int = 5,
+) -> str:
+    """Build a compact Telegram-Markdown digest from a list of AlertFireRecord.
+
+    Round 50. Used by the periodic-summary loop to compress N raw fires into
+    one batched message: header + one section per alert kind, each with up
+    to `max_per_kind` symbols. Returns "" when there are no fires (caller
+    can use truthiness as a "skip send" guard).
+
+    Section format per kind:
+        *🚀 composite (3):*  BTC/USDT (active +85), ETH/USDT (active +75), …
+
+    Section heading uses the kind name AS-IS — caller can rely on the fact
+    that 'composite' / 'liq_cascade' / 'fresh' etc. show up consistently
+    across messages, which makes the digest greppable in chat.
+    """
+    if not fire_records:
+        return ""
+
+    # Group by kind; preserve insertion order so first-seen kind shows first.
+    by_kind: dict[str, list] = {}
+    for rec in fire_records:
+        by_kind.setdefault(rec.kind, []).append(rec)
+
+    lines: list[str] = []
+    lines.append(
+        f"📋 *Alert summary — last {interval_minutes} min* "
+        f"({len(fire_records)} fire{'s' if len(fire_records) != 1 else ''})"
+    )
+    for kind, recs in by_kind.items():
+        # Compact one-line per fire: "BASE/QUOTE (status)" or "SYMBOL (status)"
+        # depending on key shape. We just strip the kind prefix off the key.
+        compact_items: list[str] = []
+        for r in recs[:max_per_kind]:
+            # Key format: "kind:BASE/QUOTE" or "kind:SYMBOL" or "kind:BASE/QUOTE:DIRECTION"
+            subject = r.key.split(":", 1)[1] if ":" in r.key else r.key
+            status_short = "✅" if r.status == "resolved" else "🚨"
+            compact_items.append(f"{subject} {status_short}")
+        more = len(recs) - max_per_kind
+        suffix = f", +{more} more" if more > 0 else ""
+        lines.append(f"*{kind} ({len(recs)}):* {', '.join(compact_items)}{suffix}")
+    return "\n".join(lines)
+
+
 def parse_watchlist(raw: list | None) -> set[str]:
     """Normalize a raw YAML watchlist into an uppercase set of tickers.
 

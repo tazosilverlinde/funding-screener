@@ -50,6 +50,7 @@ from .notifications import (
     filter_funding_rows_by_watchlist,
     filter_liq_stats_by_watchlist,
     filter_rows_by_watchlist,
+    format_alert_summary_digest,
     load_alerts_config,
     parse_watchlist,
 )
@@ -1170,6 +1171,65 @@ def _describe_errors(errs: list) -> str:
     return " | ".join(out)
 
 
+async def _alerts_summary_loop(
+    store: DataStore, telegram: TelegramClient,
+) -> None:
+    """Periodic alert summary digest (Round 50).
+
+    Wakes every minute, checks elapsed time since last digest. When the
+    configured interval has passed AND there are fires in the AlertLog
+    since the last digest, builds a compact summary and sends one Telegram
+    message.
+
+    Independent of the per-event Telegram firing: this is additive. Users
+    who want quiet operation can disable per-event alerts (set thresholds
+    very high) and rely on this digest; users who want both keep both.
+
+    State is in-memory (last_summary_at) — wipes on restart, which means
+    after a restart the next summary covers fires since startup. Acceptable
+    given the AlertLog itself is also in-memory.
+    """
+    interval = 60  # tick every 60s; the actual cadence is from settings.
+    last_summary_at: float = time.time()
+    while True:
+        try:
+            cfg = (load_alerts_config() or {}).get("alerts") or {}
+            sd_cfg = cfg.get("summary_digest") or {}
+            if not sd_cfg.get("enabled", False):
+                await asyncio.sleep(interval)
+                continue
+            interval_minutes = int(sd_cfg.get("interval_minutes", 30))
+            max_per_kind = int(sd_cfg.get("max_per_kind", 5))
+
+            now = time.time()
+            elapsed_minutes = (now - last_summary_at) / 60.0
+            if elapsed_minutes < interval_minutes:
+                await asyncio.sleep(interval)
+                continue
+
+            # Gather fires since the last summary. Pull liberally and filter
+            # by timestamp — handles cases where the AlertLog has wrapped.
+            recent = [
+                r for r in store.alert_log.recent(limit=500)
+                if r.fired_at >= last_summary_at
+            ]
+            if not recent:
+                # No fires in the window — skip but advance the clock so the
+                # next attempt sees a fresh window rather than a giant catchup.
+                last_summary_at = now
+                await asyncio.sleep(interval)
+                continue
+
+            msg = format_alert_summary_digest(recent, interval_minutes, max_per_kind=max_per_kind)
+            if msg and telegram.is_configured():
+                await telegram.send(msg[:3900])  # Telegram 4096-char cap
+            last_summary_at = now
+        except Exception as e:
+            log.exception("alerts summary loop error")
+            store.record_error(f"alerts-summary: {type(e).__name__}: {e}")
+        await asyncio.sleep(interval)
+
+
 async def _daily_digest_loop(
     store: DataStore, telegram: TelegramClient, email: EmailClient,
 ) -> None:
@@ -1311,6 +1371,9 @@ def _runner() -> None:
         loop.create_task(consume_binance_liquidations(_store.liquidations))
         # Daily digest delivery (Telegram + email, sends only at hour_utc).
         loop.create_task(_daily_digest_loop(_store, telegram, email))
+        # Alert summary digest (Round 50) — periodic batched summary of recent
+        # alert fires; complementary to the per-event Telegram messages.
+        loop.create_task(_alerts_summary_loop(_store, telegram))
         loop.run_forever()
     finally:
         try:
