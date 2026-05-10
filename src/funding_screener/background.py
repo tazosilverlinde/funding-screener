@@ -41,6 +41,7 @@ from .notifications import (
     evaluate_funding_alerts,
     evaluate_funding_deviation_alerts,
     evaluate_liquidation_cascade_alerts,
+    evaluate_error_pattern_alert,
     evaluate_loop_stall_alert,
     evaluate_memory_pressure_alert,
     evaluate_new_listing_alerts,
@@ -763,6 +764,17 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 upcoming = load_upcoming_unlocks(tradable_symbols=tradable)
                 days = int(cfg["token_unlock"].get("days_ahead", 3))
                 events.extend(evaluate_unlock_alerts(upcoming, days))
+
+            # Error-pattern alert (Round 57) — catches sustained subsystem
+            # issues by grouping errors and firing on repeats. Per-category
+            # state machine; doesn't trigger on transient one-off blips.
+            if cfg.get("error_pattern", {}).get("enabled", True):
+                ep = cfg["error_pattern"]
+                events.extend(evaluate_error_pattern_alert(
+                    store.read_recent_errors(),
+                    window_minutes=int(ep.get("window_minutes", 30)),
+                    repeat_threshold=int(ep.get("repeat_threshold", 5)),
+                ))
 
             # Loop-stall alert (Round 55) — system-health companion. Detects
             # silent stalls in any of the registered background loops.

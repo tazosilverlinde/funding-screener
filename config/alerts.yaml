@@ -66,6 +66,15 @@ alerts:
     enabled: true
     stall_multiplier: 3.0     # alert when elapsed >= this × expected interval
 
+  # Error-pattern alert (Round 57) — catches sustained subsystem failures
+  # by grouping errors by source-prefix and firing when ANY category repeats
+  # `repeat_threshold` or more times within `window_minutes`. Doesn't trip
+  # on transient RPC blips (single-blip errors don't accumulate).
+  error_pattern:
+    enabled: true
+    window_minutes: 30
+    repeat_threshold: 5
+
   # Memory-pressure alert (Round 52) — fires when process RSS crosses
   # `pct_threshold`% of `budget_mb`. Closes the loop on the 2GB hard cap:
   # operators get a Telegram heads-up before the process is at risk of

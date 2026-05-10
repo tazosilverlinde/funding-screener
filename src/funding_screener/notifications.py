@@ -466,6 +466,92 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
     return out
 
 
+def _error_category(msg: str) -> str:
+    """Extract a coarse category from an error message for grouping (Round 57).
+
+    The funding_screener convention is `<source>: <type>: <details>` where
+    <source> is one of fast-loop, slow-loop, market-caps, enrichment,
+    macro, onchain[chain], alerts: <evaluator>, etc. We take everything
+    before the first ': ' as the category — captures meaningful grouping
+    without falling for variable detail strings (which have IDs/values).
+
+    Defensive: empty/None → "unknown"; messages without a colon → first
+    50 chars.
+    """
+    if not msg:
+        return "unknown"
+    head = msg.split(": ", 1)[0]
+    return head[:50] if head else "unknown"
+
+
+def evaluate_error_pattern_alert(
+    recent_errors,
+    window_minutes: int = 30,
+    repeat_threshold: int = 5,
+) -> list[tuple[str, str, str]]:
+    """Error-pattern alert (Round 57).
+
+    Groups recent errors by category (everything before the first ': '),
+    fires when ANY category has accumulated `repeat_threshold` or more
+    occurrences within the last `window_minutes`. Single key per category
+    so the state machine handles transitions — one message when a category
+    goes hot, one when it clears.
+
+    Why per-category vs simple count: a busy market produces transient RPC
+    errors across many sources; aggregate count would always trip. A SUSTAINED
+    error from a SPECIFIC source means real subsystem trouble. A score-history
+    loop that crashes 10 times in a row is meaningfully different from 10
+    different errors from 10 different evaluators.
+
+    Inputs:
+      recent_errors: list of (datetime_utc, message_str)
+      window_minutes: lookback window
+      repeat_threshold: per-category fire threshold
+
+    Returns one (key, status, message) per category SEEN in the window.
+    Categories not seen this window don't appear at all (no resolved
+    flooding for categories that aren't even firing).
+    """
+    if not recent_errors:
+        return []
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(0, window_minutes))
+    by_cat: dict[str, list[str]] = {}
+    for ts, msg in recent_errors:
+        try:
+            if ts < cutoff:
+                continue
+        except TypeError:
+            continue  # malformed timestamp, skip
+        cat = _error_category(msg)
+        by_cat.setdefault(cat, []).append(msg)
+
+    out: list[tuple[str, str, str]] = []
+    for cat, msgs in by_cat.items():
+        key = f"error_pattern:{cat}"
+        n = len(msgs)
+        if n >= repeat_threshold:
+            # Show the latest message in the alert so the user has a concrete
+            # example, not just a count.
+            latest = msgs[-1]
+            preview = (latest[:200] + "…") if len(latest) > 200 else latest
+            out.append((
+                key, "active",
+                f"⚠️ *Error pattern* — `{cat}` repeated `{n}` times in "
+                f"the last {window_minutes} min.\n"
+                f"Latest: `{preview}`\n"
+                "Recurring same-source error suggests a sustained subsystem "
+                "issue, not transient noise. Investigate that loop's recent activity."
+            ))
+        else:
+            out.append((
+                key, "resolved",
+                f"📊 Error pattern `{cat}` back below threshold "
+                f"({n} occurrences in last {window_minutes} min).",
+            ))
+    return out
+
+
 def evaluate_loop_stall_alert(
     last_loop_ran_at,
     expected_intervals_seconds: dict[str, float],
