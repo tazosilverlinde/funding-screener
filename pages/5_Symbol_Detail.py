@@ -186,6 +186,7 @@ onchain_flows_list, _ = store.read_onchain_flows()
 onchain_net = next(
     (f.get("net_usd") for f in onchain_flows_list if f.get("token") == base_asset), None
 )
+_liq_for_score = store.read_liquidations(symbol=symbol_q, window_seconds=24 * 3600)
 composite = compute_composite_score(
     funding_8h_norm_pct=funding_row.rate_8h_norm_percent if funding_row else None,
     streak_count=enrichment.funding_streak_count if enrichment else 0,
@@ -195,6 +196,8 @@ composite = compute_composite_score(
     ls_ratio_global=enrichment.ls_ratio_global if enrichment else None,
     ls_ratio_top=enrichment.ls_ratio_top if enrichment else None,
     onchain_net_usd=onchain_net,
+    liq_long_usd_24h=_liq_for_score.get("long_liq_usd") if _liq_for_score else None,
+    liq_short_usd_24h=_liq_for_score.get("short_liq_usd") if _liq_for_score else None,
 )
 
 

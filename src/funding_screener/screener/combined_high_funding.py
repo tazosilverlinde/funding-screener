@@ -53,6 +53,7 @@ def screen_combined_high_funding(
     mexc_contracts: Iterable[ContractInfo],
     enrichments: dict[tuple[str, str], EnrichmentData],
     threshold_percent: float,
+    liq_stats_by_symbol: Optional[dict[str, dict]] = None,
     binance_volumes: Optional[dict[str, float]] = None,
     mexc_volumes: Optional[dict[str, float]] = None,
     min_volume_usd_per_side: float = 0.0,
@@ -150,6 +151,16 @@ def screen_combined_high_funding(
         if deviation:
             dev_label = f"{deviation.emoji} {deviation.z_score:+.1f}σ"
 
+        # Liquidation stats — pulled from the WebSocket buffer for whichever
+        # Binance symbol drove the signal. Both keys remain None when no
+        # data exists so compute_composite_score's noise-floor guard skips it.
+        liq_stats: dict[str, float] | None = None
+        liq_lookup_sym = b.symbol if (b and b.symbol) else (m.symbol if m else None)
+        if liq_stats_by_symbol and liq_lookup_sym:
+            liq_stats = liq_stats_by_symbol.get(liq_lookup_sym)
+        liq_long = liq_stats.get("long_liq_usd") if liq_stats else None
+        liq_short = liq_stats.get("short_liq_usd") if liq_stats else None
+
         # Composite score uses every available input.
         composite = compute_composite_score(
             funding_8h_norm_pct=sig_funding,
@@ -160,6 +171,8 @@ def screen_combined_high_funding(
             ls_ratio_global=b_enr.ls_ratio_global if b_enr else None,
             ls_ratio_top=b_enr.ls_ratio_top if b_enr else None,
             onchain_net_usd=onchain_netflow_by_base.get(base),
+            liq_long_usd_24h=liq_long,
+            liq_short_usd_24h=liq_short,
         )
 
         b_vol = binance_volumes.get(b.symbol) if b else None

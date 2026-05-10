@@ -75,6 +75,7 @@ combined_klines: dict = {}
 combined_klines.update(binance.klines)
 combined_klines.update(mexc.klines)
 score_histories = store.read_score_histories()
+liq_stats_by_symbol = store.read_liquidations(window_seconds=24 * 3600)
 rows = screen_combined_high_funding(
     binance.funding,
     mexc.funding,
@@ -88,6 +89,7 @@ rows = screen_combined_high_funding(
     onchain_netflow_by_base=onchain_by_base,
     klines_by_symbol=combined_klines,
     score_histories=score_histories,
+    liq_stats_by_symbol=liq_stats_by_symbol,
 )
 
 # Apply sector filter on the *row* set before truncation so sector picks

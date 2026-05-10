@@ -492,6 +492,7 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 screener_threshold = 0.0  # don't pre-filter for alert evaluation
                 onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in onchain_flows}
                 histories_for_alerts = store.read_score_histories()
+                liq_stats_for_alerts = store.read_liquidations(window_seconds=24 * 3600)
                 combined_rows = screen_combined_high_funding(
                     bnb.funding, mxc.funding,
                     bnb.contracts, mxc.contracts,
@@ -501,6 +502,7 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     min_volume_usd_per_side=0.0,
                     onchain_netflow_by_base=onchain_by_base,
                     score_histories=histories_for_alerts,
+                    liq_stats_by_symbol=liq_stats_for_alerts,
                 )
                 if cfg.get("composite_score", {}).get("enabled", True):
                     cs = cfg["composite_score"]

@@ -203,6 +203,8 @@ def compute_composite_score(
     ls_ratio_global: Optional[float] = None,
     ls_ratio_top: Optional[float] = None,
     onchain_net_usd: Optional[float] = None,
+    liq_long_usd_24h: Optional[float] = None,
+    liq_short_usd_24h: Optional[float] = None,
 ) -> CompositeScore:
     """Combine all available signals into a single -100..+100 score.
 
@@ -216,6 +218,7 @@ def compute_composite_score(
       | OI 24h Δ × funding   | ±15         | OI rising while shorts pay = strong bull |
       | L/S ratio extreme    | ±10         | Crowded long → contrarian short |
       | On-chain netflow     | ±15         | Withdrawals exceed deposits → bullish |
+      | Liquidation skew     | ±10         | Shorts blowing out → bullish; longs cascading → bearish |
       | Mark/Index spread    | -50% damp   | Big divergence reduces conviction (multiplicative) |
       | Top-vs-retail L/S    | ±5          | Smart money against retail = small confirm |
 
@@ -279,7 +282,33 @@ def compute_composite_score(
         sign = "withdrawals" if net_clamped > 0 else "deposits"
         contributions.append(f"on-chain net ${onchain_net_usd:+,.0f} ({sign}) → {delta:+.1f}")
 
-    # 7. Mark/Index spread risk damping (multiplicative)
+    # 7. Liquidation skew (±10)
+    # Shorts blowing out is bullish (squeeze in progress); longs cascading is
+    # bearish. We weight by both direction (skew) AND magnitude (total) so a
+    # tiny but lopsided event doesn't dominate; a big balanced cascade adds
+    # nothing because it doesn't tell us direction.
+    if (
+        liq_long_usd_24h is not None
+        and liq_short_usd_24h is not None
+    ):
+        total_liq = (liq_long_usd_24h or 0.0) + (liq_short_usd_24h or 0.0)
+        if total_liq > 1_000_000:  # noise floor: ignore quiet symbols
+            skew = (liq_short_usd_24h - liq_long_usd_24h) / total_liq
+            # Magnitude factor: full strength at $50M+ total, scaled below.
+            mag_factor = min(1.0, total_liq / 50_000_000.0)
+            delta = 10.0 * skew * mag_factor
+            if abs(delta) >= 0.5:  # don't pollute the breakdown with sub-1pt items
+                s += delta
+                bias = (
+                    "shorts squeezed"
+                    if delta > 0
+                    else "longs cascaded"
+                )
+                contributions.append(
+                    f"liq 24h ${total_liq / 1e6:.1f}M ({bias}, skew {skew:+.2f}) → {delta:+.1f}"
+                )
+
+    # 8. Mark/Index spread risk damping (multiplicative)
     if mark_index_spread_pct is not None and abs(mark_index_spread_pct) > 0.5:
         s *= 0.5
         contributions.append(
