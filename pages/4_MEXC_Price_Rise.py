@@ -12,7 +12,7 @@ if str(_SRC) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from funding_screener.config import settings  # noqa: E402
-from funding_screener.screener import screen_price_rise  # noqa: E402
+from funding_screener.screener import screen_combined_high_funding, screen_price_rise  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
@@ -68,6 +68,25 @@ rows = screen_price_rise(
     onchain_netflow_by_base=onchain_by_base,
 )
 
+# Round 47: enrich each row with Quality / Age (h) by joining against the
+# combined screener output keyed by (base, quote). Mirrors Page 3's logic.
+_bnb_snap = store.read_binance()
+_score_histories = store.read_score_histories()
+_combined_for_join = screen_combined_high_funding(
+    _bnb_snap.funding, snap.funding,
+    _bnb_snap.contracts, snap.contracts,
+    enrichments,
+    threshold_percent=0.0,
+    binance_volumes=_bnb_snap.volumes, mexc_volumes=snap.volumes,
+    min_volume_usd_per_side=0.0,
+    onchain_netflow_by_base=onchain_by_base,
+    klines_by_symbol=snap.klines,
+    score_histories=_score_histories,
+)
+_combined_by_key: dict[tuple[str, str], object] = {
+    (r.base_asset.upper(), r.quote_asset): r for r in _combined_for_join
+}
+
 cap = int(settings()["row_limit"])
 df = to_df(
     [r.model_dump() for r in rows[:cap]],
@@ -95,10 +114,27 @@ if not df.empty:
         df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
     )
     df = df.drop(columns=["composite_score", "composite_emoji", "composite_short"])
+
+    # Round 47: pull Quality + Age from the combined-row lookup.
+    def _lookup_quality(row_dict: dict) -> str:
+        base = (row_dict.get("base_asset") or "").upper()
+        quote = row_dict.get("quote_asset") or "USDT"
+        peer = _combined_by_key.get((base, quote))
+        return getattr(peer, "setup_quality_label", "") or ""
+
+    def _lookup_age(row_dict: dict) -> float | None:
+        base = (row_dict.get("base_asset") or "").upper()
+        quote = row_dict.get("quote_asset") or "USDT"
+        peer = _combined_by_key.get((base, quote))
+        return getattr(peer, "signal_age_hours", None)
+
+    raw_rows_dump = [r.model_dump() for r in rows[:cap]]
+    df["Quality"] = [_lookup_quality(d) for d in raw_rows_dump]
+    df["Age (h)"] = [_lookup_age(d) for d in raw_rows_dump]
     df["symbol"] = df["symbol"].apply(
         lambda s: f"/Symbol_Detail?exchange=MEXC&symbol={s}" if s else ""
     )
-    front = ["Score", "Score label"]
+    front = ["Score", "Score label", "Quality", "Age (h)"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
     df = df.rename(
@@ -130,6 +166,24 @@ if not df.empty:
         "Score label": st.column_config.TextColumn(
             "Score label",
             help="Human-readable bucket: 🚀 Strong bull / 🟢 Bullish / ↗ Mild bull / 🟡 Neutral / ↘ Mild bear / 🔴 Bearish / 💥 Strong bear",
+        ),
+        "Quality": st.column_config.TextColumn(
+            "Quality",
+            help=(
+                "Setup-quality classification (Round 34) — Fresh / Building / "
+                "Mature / Late / Noisy. On a price-rise page: a 500%+ rise with "
+                "🚀 Fresh bull is early; with ⏰ Late or ⚠️ Noisy is suspect."
+            ),
+        ),
+        "Age (h)": st.column_config.NumberColumn(
+            "Age (h)",
+            format="%.1f",
+            help=(
+                "Hours since the score most-recently entered the bullish/bearish "
+                "region. Cross-reference with % return: short age + big return "
+                "= signal tracking the move; long age + small return = signal "
+                "predicted it but price hasn't moved yet."
+            ),
         ),
         "Symbol": st.column_config.LinkColumn(
             "Symbol",

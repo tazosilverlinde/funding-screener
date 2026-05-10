@@ -12,7 +12,7 @@ if str(_SRC) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from funding_screener.config import is_binance_enabled, settings  # noqa: E402
-from funding_screener.screener import screen_price_rise  # noqa: E402
+from funding_screener.screener import screen_combined_high_funding, screen_price_rise  # noqa: E402
 from funding_screener.streamlit_helpers import (  # noqa: E402
     auto_rerun,
     boot,
@@ -76,6 +76,27 @@ rows = screen_price_rise(
     onchain_netflow_by_base=onchain_by_base,
 )
 
+# Round 47: enrich each price-rise row with Quality / Age (h) by joining
+# against the combined screener output keyed by (base, quote). The combined
+# screener already does this work as part of the composite-score pipeline;
+# we just look up by symbol pair so this page stays consistent with Page 2.
+_mxc_snap = store.read_mexc()
+_score_histories = store.read_score_histories()
+_combined_for_join = screen_combined_high_funding(
+    snap.funding, _mxc_snap.funding,
+    snap.contracts, _mxc_snap.contracts,
+    enrichments,
+    threshold_percent=0.0,
+    binance_volumes=snap.volumes, mexc_volumes=_mxc_snap.volumes,
+    min_volume_usd_per_side=0.0,
+    onchain_netflow_by_base=onchain_by_base,
+    klines_by_symbol=snap.klines,
+    score_histories=_score_histories,
+)
+_combined_by_key: dict[tuple[str, str], object] = {
+    (r.base_asset.upper(), r.quote_asset): r for r in _combined_for_join
+}
+
 cap = int(settings()["row_limit"])
 df = to_df(
     [r.model_dump() for r in rows[:cap]],
@@ -104,12 +125,31 @@ if not df.empty:
         df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
     )
     df = df.drop(columns=["composite_score", "composite_emoji", "composite_short"])
+
+    # Round 47: pull Quality + Age from the combined-row lookup. Match by
+    # (base, quote) so we work even when the symbol naming differs across
+    # spot/futures conventions.
+    def _lookup_quality(row_dict: dict) -> str:
+        base = (row_dict.get("base_asset") or "").upper()
+        quote = row_dict.get("quote_asset") or "USDT"
+        peer = _combined_by_key.get((base, quote))
+        return getattr(peer, "setup_quality_label", "") or ""
+
+    def _lookup_age(row_dict: dict) -> float | None:
+        base = (row_dict.get("base_asset") or "").upper()
+        quote = row_dict.get("quote_asset") or "USDT"
+        peer = _combined_by_key.get((base, quote))
+        return getattr(peer, "signal_age_hours", None)
+
+    raw_rows_dump = [r.model_dump() for r in rows[:cap]]
+    df["Quality"] = [_lookup_quality(d) for d in raw_rows_dump]
+    df["Age (h)"] = [_lookup_age(d) for d in raw_rows_dump]
     # Make symbol clickable → detail page.
     df["symbol"] = df["symbol"].apply(
         lambda s: f"/Symbol_Detail?exchange=Binance&symbol={s}" if s else ""
     )
-    # Move Score columns to the front; everything else preserves order.
-    front = ["Score", "Score label"]
+    # Move Score / Quality / Age to the front; everything else preserves order.
+    front = ["Score", "Score label", "Quality", "Age (h)"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
     df = df.rename(
@@ -144,6 +184,28 @@ if not df.empty:
         "Score label": st.column_config.TextColumn(
             "Score label",
             help="Human-readable bucket of the composite score.",
+        ),
+        "Quality": st.column_config.TextColumn(
+            "Quality",
+            help=(
+                "Setup-quality classification (Round 34) — synthesized from "
+                "score / age / momentum / stability. Same buckets as Page 2.\n\n"
+                "On a price-rise page this matters most: a 500%+ rise with "
+                "🚀 Fresh bull is early in its move; with ⏰ Late bull or "
+                "⚠️ Noisy is likely already played out / unreliable.\n\n"
+                "Empty when no enrichment yet (≈3 min after deploy)."
+            ),
+        ),
+        "Age (h)": st.column_config.NumberColumn(
+            "Age (h)",
+            format="%.1f",
+            help=(
+                "Hours since the score most-recently entered the bullish (≥+30) "
+                "or bearish (≤-30) region. Cross-reference with the % return "
+                "columns: short age + big return = signal lit up AFTER the move "
+                "(probably tracking, not predicting); long age + small return = "
+                "score saw it coming but price hasn't released yet."
+            ),
         ),
         "Symbol": st.column_config.LinkColumn(
             "Symbol",
