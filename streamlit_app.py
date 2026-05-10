@@ -261,6 +261,123 @@ if _sector_rows:
 
 st.divider()
 
+
+## ---- liquidation summary (round 19) ------------------------------------------
+## Surfaces the WebSocket liquidation tape on the landing page so users see
+## forced-flow activity without having to navigate to Page 8. Biggest squeezes
+## (short cascades = bullish) and biggest crashes (long cascades = bearish)
+## sit side-by-side; aggregate ticker shows market-wide forced flow.
+_liq_all = store.read_liquidations(window_seconds=24 * 3600)
+if _liq_all:
+    _total_long = sum(s.get("long_liq_usd", 0.0) or 0.0 for s in _liq_all.values())
+    _total_short = sum(s.get("short_liq_usd", 0.0) or 0.0 for s in _liq_all.values())
+    _total_all = _total_long + _total_short
+    _events = sum(s.get("events_count", 0) or 0 for s in _liq_all.values())
+
+    st.subheader("Liquidations — last 24h, market-wide")
+    st.caption(
+        "Aggregate forced-flow across every Binance perp. **Long-dominant** "
+        "totals usually accompany sharp drops (longs blown out as price falls "
+        "into stops); **short-dominant** totals accompany squeezes (shorts "
+        "force-bought back). Big mixed totals = volatile two-way market."
+    )
+
+    lq1, lq2, lq3, lq4 = st.columns(4)
+    lq1.metric(
+        "Total 24h liq",
+        f"${_total_all / 1e6:,.0f}M" if _total_all >= 1e6 else f"${_total_all / 1e3:.0f}K",
+        f"{_events:,} events",
+    )
+    lq2.metric(
+        "Long liq",
+        f"${_total_long / 1e6:,.0f}M",
+        help="Sum across all symbols — drop-side forced selling.",
+    )
+    lq3.metric(
+        "Short liq",
+        f"${_total_short / 1e6:,.0f}M",
+        help="Sum across all symbols — squeeze-side forced buying.",
+    )
+    if _total_all > 0:
+        skew = (_total_short - _total_long) / _total_all
+        if skew > 0.2:
+            bias_emoji, bias_label = "🟢", "Shorts dominantly liquidated"
+        elif skew < -0.2:
+            bias_emoji, bias_label = "🔴", "Longs dominantly liquidated"
+        else:
+            bias_emoji, bias_label = "🟡", "Two-way / balanced"
+        lq4.metric("Market bias", f"{bias_emoji} {bias_label}", f"skew {skew:+.2f}")
+
+    # Top cascades (long-dominant) and top squeezes (short-dominant), 5 each.
+    _liq_rows = []
+    for sym, stats in _liq_all.items():
+        total = stats.get("total_usd", 0.0) or 0.0
+        if total < 1_000_000:  # noise floor on the landing page
+            continue
+        _liq_rows.append({
+            "Symbol": sym,
+            "Long ($)": stats.get("long_liq_usd", 0.0) or 0.0,
+            "Short ($)": stats.get("short_liq_usd", 0.0) or 0.0,
+            "Total ($)": total,
+        })
+    if _liq_rows:
+        col_squeeze, col_cascade = st.columns(2)
+        # Squeezes: short_liq > long_liq, ranked by short_liq descending
+        squeezes = sorted(
+            [r for r in _liq_rows if r["Short ($)"] > r["Long ($)"]],
+            key=lambda r: r["Short ($)"], reverse=True,
+        )[:5]
+        cascades = sorted(
+            [r for r in _liq_rows if r["Long ($)"] > r["Short ($)"]],
+            key=lambda r: r["Long ($)"], reverse=True,
+        )[:5]
+        col_squeeze.markdown("**🟢 Top short squeezes** (shorts blown out)")
+        if squeezes:
+            sq_df = pd.DataFrame([
+                {
+                    "Symbol": f"/Symbol_Detail?exchange=Binance&symbol={r['Symbol']}",
+                    "Short liq": r["Short ($)"],
+                    "Long liq": r["Long ($)"],
+                }
+                for r in squeezes
+            ])
+            col_squeeze.dataframe(
+                sq_df, hide_index=True, use_container_width=True,
+                column_config={
+                    "Symbol": st.column_config.LinkColumn(
+                        "Symbol", display_text=r".*symbol=([^&]+)"
+                    ),
+                    "Short liq": st.column_config.NumberColumn(format="$%,.0f"),
+                    "Long liq": st.column_config.NumberColumn(format="$%,.0f"),
+                },
+            )
+        else:
+            col_squeeze.write("_None in the last 24h._")
+        col_cascade.markdown("**🔴 Top long cascades** (longs blown out)")
+        if cascades:
+            ca_df = pd.DataFrame([
+                {
+                    "Symbol": f"/Symbol_Detail?exchange=Binance&symbol={r['Symbol']}",
+                    "Long liq": r["Long ($)"],
+                    "Short liq": r["Short ($)"],
+                }
+                for r in cascades
+            ])
+            col_cascade.dataframe(
+                ca_df, hide_index=True, use_container_width=True,
+                column_config={
+                    "Symbol": st.column_config.LinkColumn(
+                        "Symbol", display_text=r".*symbol=([^&]+)"
+                    ),
+                    "Long liq": st.column_config.NumberColumn(format="$%,.0f"),
+                    "Short liq": st.column_config.NumberColumn(format="$%,.0f"),
+                },
+            )
+        else:
+            col_cascade.write("_None in the last 24h._")
+    st.divider()
+
+
 ## ---- performance: per-loop cycle timings -----------------------------------
 _loop_stats = store.read_loop_stats()
 if _loop_stats:
