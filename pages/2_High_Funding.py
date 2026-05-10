@@ -162,6 +162,7 @@ df = to_df(
         "signal_age_hours",
         "composite_emoji",
         "composite_short",
+        "setup_quality_label",
         "signal_emoji",
         "signal_short",
         "funding_deviation_label",
@@ -235,10 +236,13 @@ if not df.empty:
         lambda v: v if isinstance(v, list) and v else None
     )
     df = df.drop(columns=["liq_net_hourly_chart"])
+    # Setup quality classification (Round 34).
+    df["Quality"] = df["setup_quality_label"].fillna("—")
+    df = df.drop(columns=["setup_quality_label"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / σ / Age / Score-trend / Signal / Dev / Funding / Liq trend / Liq 24h to the front.
-    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Score trend", "Score label",
+    # Move Score / Δ / σ / Age / Quality / Score-trend / Signal / Dev / Funding / Liq trend / Liq 24h to the front.
+    front = ["Score", "Δ 1h", "σ 24h", "Age (h)", "Quality", "Score trend", "Score label",
              "Signal", "Dev", "Dev z", "Funding", "Liq trend", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
@@ -399,6 +403,21 @@ if not df.empty:
                 "  • Spiking up at the right edge → fresh acceleration"
             ),
             width="small",
+        ),
+        "Quality": st.column_config.TextColumn(
+            "Quality",
+            help=(
+                "One-glance classification combining score magnitude, age, "
+                "1h delta, and 24h stddev:\n\n"
+                "🚀 Fresh bull / 💥 Fresh bear  — score crossed extremes <1h ago\n"
+                "📈 Building bull / 📉 Building bear — 1-4h old, still moving with signal\n"
+                "🎯 Mature bull / 🎯 Mature bear — 4-12h old, stable\n"
+                "⏰ Late bull / ⏰ Late bear     — >12h old, likely priced in\n"
+                "⚠️ Noisy                        — σ 24h > 30, don't trust direction\n"
+                "—                                — neutral or insufficient history\n\n"
+                "Sortable: ascending puts neutrals first; descending bunches the "
+                "actionable buckets together."
+            ),
         ),
         "Score trend": st.column_config.LineChartColumn(
             "Score trend",

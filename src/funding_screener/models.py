@@ -168,6 +168,10 @@ class CombinedFundingRow(_Frozen):
     # (cascade). USD-denominated. Empty when the WS buffer has nothing for this
     # symbol or no Binance side exists.
     liq_net_hourly_chart: list[float] = []
+    # Setup quality classification (Round 34) — synthesizes age + delta + sigma
+    # into a single bucket so users prioritize without cross-referencing 4 cols.
+    # Examples: "🚀 Fresh bull", "📈 Building bear", "⏰ Late bull", "⚠️ Noisy".
+    setup_quality_label: Optional[str] = None
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.

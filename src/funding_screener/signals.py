@@ -396,6 +396,87 @@ def estimate_funding_income(
 
 
 @dataclass(frozen=True)
+class SetupQuality:
+    """Categorical label combining a row's score, age, momentum, and stability.
+
+    Synthesizes four orthogonal signals into one human-readable bucket so
+    Page 2 readers can prioritize without cross-referencing four columns:
+
+      - composite_score: directional verdict (already in "Score label")
+      - signal_age_hours: how long the current signal has been on
+      - score_delta_1h: short-window momentum
+      - score_stddev_24h: signal stability over the window
+
+    The buckets answer "what kind of setup is this?":
+
+      🚀 Fresh bull / 💥 Fresh bear  — score crossed extremes < 1h ago, low vol
+      📈 Building bull / 📉 Building bear — 1-4h old, score still moving in dir
+      🎯 Mature bull / 🎯 Mature bear — 4-12h old, stable, thesis holding
+      ⏰ Late bull / ⏰ Late bear     — > 12h old, likely already moved
+      ⚠️ Noisy                        — σ > 30, signal flipping
+      —                                — score below ±30 / not enough data
+    """
+    emoji: str
+    label: str
+
+
+def classify_setup_quality(
+    score: Optional[int],
+    age_hours: Optional[float],
+    score_delta_1h: Optional[int],
+    score_stddev_24h: Optional[float],
+    *,
+    bull_threshold: int = 30,
+    noisy_sigma: float = 30.0,
+) -> SetupQuality:
+    """Map the four inputs to a single bucket. Returns ('—', '—') for neutral.
+
+    Buckets are ordered by precedence: Noisy first (overrides everything),
+    then directional bucketing by age. A row that's bullish but with σ > 30
+    is reported as Noisy, not Building — the std-dev says "don't trust the
+    direction yet".
+    """
+    if score is None or abs(score) < bull_threshold:
+        return SetupQuality(emoji="—", label="—")
+
+    # Noisy short-circuit — supersedes age-based classification.
+    if score_stddev_24h is not None and score_stddev_24h > noisy_sigma:
+        return SetupQuality(emoji="⚠️", label="Noisy")
+
+    direction = "bull" if score >= bull_threshold else "bear"
+
+    # No age data yet → can't classify by freshness; fall back to direction.
+    if age_hours is None:
+        return SetupQuality(
+            emoji="🟢" if direction == "bull" else "🔴",
+            label="Bullish" if direction == "bull" else "Bearish",
+        )
+
+    if age_hours < 1.0:
+        return SetupQuality(
+            emoji="🚀" if direction == "bull" else "💥",
+            label=f"Fresh {direction}",
+        )
+    if age_hours < 4.0:
+        # "Building" requires the score still moving in the signal's direction.
+        moving_with = (
+            score_delta_1h is not None
+            and ((direction == "bull" and score_delta_1h > 0)
+                 or (direction == "bear" and score_delta_1h < 0))
+        )
+        if moving_with:
+            return SetupQuality(
+                emoji="📈" if direction == "bull" else "📉",
+                label=f"Building {direction}",
+            )
+        # Same age window but score has stopped advancing → already mature.
+        return SetupQuality(emoji="🎯", label=f"Mature {direction}")
+    if age_hours < 12.0:
+        return SetupQuality(emoji="🎯", label=f"Mature {direction}")
+    return SetupQuality(emoji="⏰", label=f"Late {direction}")
+
+
+@dataclass(frozen=True)
 class FundingDeviation:
     """Tells the user whether current funding is unusual vs recent history.
 

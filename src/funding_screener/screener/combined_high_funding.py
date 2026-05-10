@@ -20,6 +20,7 @@ from ..score_history import (
 )
 from ..sectors import sector_for
 from ..signals import (
+    classify_setup_quality,
     classify_signal,
     compute_composite_score,
     compute_funding_deviation,
@@ -276,7 +277,24 @@ def screen_combined_high_funding(
                 funding_history_chart=sparkline_history,
                 score_history_chart=score_chart,
                 liq_net_hourly_chart=liq_net_chart,
+                setup_quality_label=None,  # filled in below after composite is final
             )
         )
-    out.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)
-    return out
+    # Setup quality is computed after row construction so we can pass the
+    # already-attached score / age / delta / stddev fields without recomputing.
+    # Frozen Pydantic models → swap via model_copy(update=).
+    enriched: list[CombinedFundingRow] = []
+    for r in out:
+        quality = classify_setup_quality(
+            score=r.composite_score,
+            age_hours=r.signal_age_hours,
+            score_delta_1h=r.composite_score_delta_1h,
+            score_stddev_24h=r.composite_score_stddev_24h,
+        )
+        label = (
+            f"{quality.emoji} {quality.label}"
+            if quality.label != "—" else None
+        )
+        enriched.append(r.model_copy(update={"setup_quality_label": label}))
+    enriched.sort(key=lambda r: r.max_abs_8h_norm_percent, reverse=True)
+    return enriched
