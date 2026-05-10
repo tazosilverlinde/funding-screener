@@ -41,6 +41,69 @@ st.caption("Read-only Binance & MEXC perpetual-futures screener. Public APIs onl
 
 freshness_banner(store)
 
+
+# ---- Market sentiment hero (Round 30) ----------------------------------------
+# Distills every tracked pair into one risk-on / risk-off read at the very top
+# of the landing page. Computed up-front because it's the most important number
+# on the page; everything below is detail.
+
+def _render_market_sentiment_hero() -> None:
+    bnb_h = store.read_binance()
+    mxc_h = store.read_mexc()
+    enrichments_h = store.read_enrichments()
+    onchain_h, _ = store.read_onchain_flows()
+    onchain_by_base_h = {f["token"]: f.get("net_usd", 0.0) for f in onchain_h}
+    klines_h: dict = {}
+    klines_h.update(bnb_h.klines)
+    klines_h.update(mxc_h.klines)
+    from funding_screener.screener import screen_combined_high_funding as _screen_hero  # noqa: E402
+    rows = _screen_hero(
+        bnb_h.funding, mxc_h.funding,
+        bnb_h.contracts, mxc_h.contracts,
+        enrichments_h,
+        threshold_percent=0.0,
+        binance_volumes=bnb_h.volumes, mexc_volumes=mxc_h.volumes,
+        min_volume_usd_per_side=0.0,
+        onchain_netflow_by_base=onchain_by_base_h,
+        klines_by_symbol=klines_h,
+        liq_stats_by_symbol=store.read_liquidations(window_seconds=24 * 3600),
+    )
+    scored = [r for r in rows if r.composite_score is not None]
+    if not scored:
+        return  # too early — fast loop hasn't populated enough data yet
+    n_total = len(scored)
+    avg_score = sum(r.composite_score for r in scored) / n_total
+    n_bull = sum(1 for r in scored if r.composite_score >= 30)
+    n_bear = sum(1 for r in scored if r.composite_score <= -30)
+    n_strong_bull = sum(1 for r in scored if r.composite_score >= 70)
+    n_strong_bear = sum(1 for r in scored if r.composite_score <= -70)
+    pct_bull = (n_bull / n_total) * 100.0
+    pct_bear = (n_bear / n_total) * 100.0
+    bull_minus_bear = pct_bull - pct_bear
+
+    if avg_score >= 20 and bull_minus_bear >= 10:
+        emoji, regime, box = "🚀", "Risk-on — bullish breadth", st.success
+    elif avg_score <= -20 and bull_minus_bear <= -10:
+        emoji, regime, box = "💥", "Risk-off — bearish breadth", st.error
+    elif avg_score >= 5:
+        emoji, regime, box = "🟢", "Mildly bullish — leaning long", st.info
+    elif avg_score <= -5:
+        emoji, regime, box = "🔴", "Mildly bearish — leaning short", st.warning
+    else:
+        emoji, regime, box = "🟡", "Mixed / no clear regime", st.info
+
+    box(
+        f"**{emoji} Market sentiment: {regime}**  \n"
+        f"Across {n_total} tracked pairs: "
+        f"avg composite score `{avg_score:+.1f}`  •  "
+        f"🟢 bullish (≥+30): **{n_bull}** ({pct_bull:.0f}%, {n_strong_bull} strong)  •  "
+        f"🔴 bearish (≤−30): **{n_bear}** ({pct_bear:.0f}%, {n_strong_bear} strong)  •  "
+        f"breadth Δ {bull_minus_bear:+.0f} pp"
+    )
+
+
+_render_market_sentiment_hero()
+
 # ---- daily highlights (top of page — newspaper-style digest) ----
 # Aggregates one headline from each major signal source so the user sees
 # what matters at first glance without clicking through pages.
