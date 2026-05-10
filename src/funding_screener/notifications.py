@@ -274,6 +274,68 @@ def evaluate_funding_alerts(funding_rows, threshold_pct: float) -> list[tuple[st
     return out
 
 
+def parse_watchlist(raw: list | None) -> set[str]:
+    """Normalize a raw YAML watchlist into an uppercase set of tickers.
+
+    Tolerates None, non-string entries, and mixed case. Empty/None input → empty set.
+    """
+    if not raw:
+        return set()
+    out: set[str] = set()
+    for s in raw:
+        if isinstance(s, str) and s.strip():
+            out.add(s.strip().upper())
+    return out
+
+
+def filter_rows_by_watchlist(rows, watchlist: set[str]) -> list:
+    """Return only rows whose base_asset is in the watchlist (uppercase match).
+
+    Empty watchlist → return rows unchanged (no filtering, all rows eligible).
+    Used by the alerts loop to gate per-symbol evaluators on a user-curated
+    list. Sector-rotation alerts intentionally bypass this filter.
+    """
+    if not watchlist:
+        return list(rows or [])
+    return [
+        r for r in (rows or [])
+        if (getattr(r, "base_asset", "") or "").upper() in watchlist
+    ]
+
+
+def filter_funding_rows_by_watchlist(funding_rows, watchlist: set[str]) -> list:
+    """Filter raw FundingRow list (different shape from CombinedFundingRow)
+    so the funding_rate threshold alert respects watchlist too.
+    """
+    if not watchlist:
+        return list(funding_rows or [])
+    return [
+        r for r in (funding_rows or [])
+        if (getattr(r, "base_asset", "") or "").upper() in watchlist
+    ]
+
+
+def filter_liq_stats_by_watchlist(
+    liq_stats_by_symbol: dict, watchlist: set[str],
+) -> dict:
+    """Filter symbol-keyed liquidation stats. Symbol shape is e.g. 'BTCUSDT' —
+    we strip the quote suffix to match the base-only watchlist. Case-insensitive
+    on the input symbol so a defensive 'btcusdt' is normalized.
+    """
+    if not watchlist:
+        return dict(liq_stats_by_symbol or {})
+    out: dict = {}
+    for sym, stats in (liq_stats_by_symbol or {}).items():
+        sym_upper = (sym or "").upper()
+        for q in ("USDT", "USDC", "BUSD"):
+            if sym_upper.endswith(q):
+                base = sym_upper[: -len(q)]
+                if base in watchlist:
+                    out[sym] = stats
+                break
+    return out
+
+
 def _build_thesis_block_for_row(row) -> str:
     """Compose the auto-thesis from a row's optional fields and format it as
     Telegram Markdown. Returns "" when no reasons or risks fire.

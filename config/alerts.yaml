@@ -18,6 +18,16 @@ alerts:
   enabled: true
   cooldown_minutes: 240   # 4 hours per (alert_type, symbol) pair
 
+  # Watchlist filter (Round 48). When non-empty, per-symbol alerts (composite,
+  # score-delta, fresh-setup, funding-deviation, OI-surge) only fire for rows
+  # whose base asset is in this list. Sector-rotation and aggregate-flow
+  # alerts still see the full universe so a sector turning bullish across
+  # ALL its tokens still fires regardless of watchlist.
+  # Empty list (default) = no filter; every pair eligible to fire.
+  # Use uppercase tickers, e.g.:
+  #   watchlist: [BTC, ETH, SOL, WIF, PEPE]
+  watchlist: []
+
   # Composite score crossing extremes — biggest signal-to-noise.
   composite_score:
     enabled: true

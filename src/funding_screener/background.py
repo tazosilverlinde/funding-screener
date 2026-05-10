@@ -47,7 +47,11 @@ from .notifications import (
     evaluate_sector_rotation_alerts,
     evaluate_unlock_alerts,
     evaluate_whale_flow_alerts,
+    filter_funding_rows_by_watchlist,
+    filter_liq_stats_by_watchlist,
+    filter_rows_by_watchlist,
     load_alerts_config,
+    parse_watchlist,
 )
 from .sectors import sector_aggregates as _sector_aggregates
 from .unlocks import load_upcoming_unlocks as _load_upcoming_unlocks
@@ -588,29 +592,38 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     score_histories=histories_for_alerts,
                     liq_stats_by_symbol=liq_stats_for_alerts,
                 )
+
+                # Watchlist filter (Round 48). When the YAML watchlist is
+                # non-empty, per-symbol evaluators only see those rows.
+                # Sector-rotation still uses unfiltered rows so a sector flip
+                # across the FULL universe still fires regardless of which
+                # specific bases are watchlisted.
+                _watchlist_set = parse_watchlist(cfg.get("watchlist"))
+                watchlisted_rows = filter_rows_by_watchlist(combined_rows, _watchlist_set)
+
                 if cfg.get("composite_score", {}).get("enabled", True):
                     cs = cfg["composite_score"]
                     events.extend(evaluate_composite_alerts(
-                        combined_rows,
+                        watchlisted_rows,
                         bull_threshold=int(cs.get("bullish_threshold", 70)),
                         bear_threshold=int(cs.get("bearish_threshold", -70)),
                     ))
                 if cfg.get("composite_score_delta", {}).get("enabled", True):
                     sd = cfg["composite_score_delta"]
                     events.extend(evaluate_score_delta_alerts(
-                        combined_rows,
+                        watchlisted_rows,
                         abs_threshold=int(sd.get("abs_threshold", 25)),
                     ))
                 # Fresh-setup alert — added Round 41.
                 if cfg.get("fresh_setup", {}).get("enabled", True):
                     fs = cfg["fresh_setup"]
                     events.extend(evaluate_fresh_setup_alerts(
-                        combined_rows,
+                        watchlisted_rows,
                         min_abs_score=int(fs.get("min_abs_score", 70)),
                     ))
-                # Sector-rotation alert — added Round 42. Builds aggregates
-                # from the same combined_rows the other evaluators see, so
-                # the rotation read stays consistent with Page 1's table.
+                # Sector-rotation alert — added Round 42. Always uses the
+                # FULL combined_rows (not watchlisted_rows) so sector aggregates
+                # reflect the whole universe.
                 if cfg.get("sector_rotation", {}).get("enabled", True):
                     sr = cfg["sector_rotation"]
                     sector_rows = _sector_aggregates(combined_rows)
@@ -619,40 +632,49 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                         threshold=int(sr.get("threshold", 30)),
                         min_token_count=int(sr.get("min_token_count", 3)),
                     ))
-                # Funding-deviation alerts — added Round 13. Re-uses the
-                # combined_rows that already have funding_deviation_z attached.
+                # Funding-deviation alerts — added Round 13.
                 if cfg.get("funding_deviation", {}).get("enabled", True):
                     fd = cfg["funding_deviation"]
                     events.extend(evaluate_funding_deviation_alerts(
-                        combined_rows,
+                        watchlisted_rows,
                         z_threshold=float(fd.get("z_threshold", 2.5)),
                     ))
-                # OI 24h surge — config existed since the alerts system shipped
-                # but evaluator wasn't wired until Round 20.
+                # OI 24h surge — added Round 20.
                 if cfg.get("oi_surge", {}).get("enabled", True):
                     os_cfg = cfg["oi_surge"]
                     events.extend(evaluate_oi_surge_alerts(
-                        combined_rows,
+                        watchlisted_rows,
                         threshold_pct_24h=float(os_cfg.get("threshold_pct_24h", 50.0)),
                     ))
             except Exception as e:
                 log.warning("alerts: composite evaluator failed: %s", e)
 
-            # Funding rate threshold.
+            # Funding rate threshold. Watchlist filter via shared helper.
             if cfg.get("funding_rate", {}).get("enabled", True):
                 thr = float(cfg["funding_rate"].get("threshold_pct_8h", 2.0))
-                events.extend(evaluate_funding_alerts(list(bnb.funding) + list(mxc.funding), thr))
+                _all_funding = filter_funding_rows_by_watchlist(
+                    list(bnb.funding) + list(mxc.funding), _watchlist_set,
+                )
+                events.extend(evaluate_funding_alerts(_all_funding, thr))
 
-            # Whale flows.
+            # Whale flows. The "token" field on each flow IS the base asset,
+            # so the same filter helper works after a small adapter.
             if cfg.get("whale_flow", {}).get("enabled", True):
                 thr_usd = float(cfg["whale_flow"].get("threshold_usd", 20_000_000))
-                events.extend(evaluate_whale_flow_alerts(onchain_flows, thr_usd))
+                _flows_for_alert = onchain_flows
+                if _watchlist_set:
+                    _flows_for_alert = [
+                        f for f in onchain_flows
+                        if (f.get("token") or "").upper() in _watchlist_set
+                    ]
+                events.extend(evaluate_whale_flow_alerts(_flows_for_alert, thr_usd))
 
             # Liquidation cascades + big single events — added Round 15.
             if cfg.get("liquidations", {}).get("enabled", True):
                 lc = cfg["liquidations"]
                 window_s = int(lc.get("window_seconds", 3600))
                 liq_stats = store.read_liquidations(window_seconds=window_s)
+                liq_stats = filter_liq_stats_by_watchlist(liq_stats, _watchlist_set)
                 events.extend(evaluate_liquidation_cascade_alerts(
                     liq_stats,
                     cascade_threshold_usd=float(lc.get("cascade_threshold_usd", 50_000_000)),
