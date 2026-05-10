@@ -540,6 +540,7 @@ if _loop_stats:
         from funding_screener.process_memory import (  # noqa: E402
             PROCESS_MEMORY_BUDGET_MB,
             current_process_memory_mb,
+            estimate_buffer_memory,
             memory_pressure_label,
         )
         _rss_mb = current_process_memory_mb()
@@ -556,6 +557,24 @@ if _loop_stats:
                 f"`{PROCESS_MEMORY_BUDGET_MB:,.0f} MB` budget used ({_pct_used:.0f}%) — "
                 f"{'OK' if _pressure == 'ok' else 'WATCH' if _pressure == 'warn' else 'CRITICAL'}"
             )
+        # Per-buffer breakdown (Round 53) — diagnostic when the bar above
+        # shows pressure; tells operators WHICH buffer is the outlier.
+        _buffer_rows = estimate_buffer_memory(store)
+        st.caption(
+            "**In-memory buffer breakdown** (entries + heuristic MB; the "
+            "RSS bar above is the source of truth, this just shows where "
+            "growth is concentrated):"
+        )
+        st.dataframe(
+            pd.DataFrame(_buffer_rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "buffer": st.column_config.TextColumn("Buffer"),
+                "entries": st.column_config.NumberColumn("Entries", format="%d"),
+                "est_mb": st.column_config.NumberColumn("Est MB", format="%.2f"),
+            },
+        )
         perf_rows = []
         for name in sorted(_loop_stats.keys()):
             s = _loop_stats[name]
