@@ -31,6 +31,14 @@ alerts:
     enabled: true
     abs_threshold: 25       # alert when |score Δ 1h| >= this
 
+  # Funding-rate deviation — fires when current funding is z >= threshold
+  # away from its ~30-period mean. Mean-revert candidates: extreme overshoot
+  # often precedes a cooldown; extreme undershoot precedes a squeeze.
+  # Tracked per direction so a flip from overshoot to undershoot re-fires.
+  funding_deviation:
+    enabled: true
+    z_threshold: 2.5         # alert when |z-score| >= 2.5σ
+
   # Funding rate crossing absolute threshold (8h-normalized).
   funding_rate:
     enabled: true

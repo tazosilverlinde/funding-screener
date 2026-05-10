@@ -185,6 +185,53 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
     return out
 
 
+def evaluate_funding_deviation_alerts(
+    combined_rows,
+    z_threshold: float = 2.5,
+) -> list[tuple[str, str, str]]:
+    """Funding-rate-deviation alert — fires on extreme overshoots/undershoots.
+
+    Builds on the funding_deviation_z field added in Round 12. The alert key
+    is per (base, quote, direction) so an "extreme overshoot" alert and an
+    "extreme undershoot" alert on the same pair are tracked independently —
+    a flip from one to the other should re-fire, not be suppressed.
+
+    Direction is encoded in the key so AlertState's resolved-transition logic
+    correctly fires both "no longer overshooting" and "now undershooting" on
+    a same-row regime flip rather than swallowing it.
+    """
+    out: list[tuple[str, str, str]] = []
+    for r in combined_rows:
+        z = getattr(r, "funding_deviation_z", None)
+        if z is None:
+            continue
+        sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+        # One key per direction — we track overshoot and undershoot separately.
+        for direction, predicate, emoji, label in (
+            ("over", z >= z_threshold, "🔥", "extreme overshoot"),
+            ("under", z <= -z_threshold, "❄", "extreme undershoot"),
+        ):
+            key = f"funding_dev:{r.base_asset}/{r.quote_asset}:{direction}"
+            if predicate:
+                bias = (
+                    "Mean-revert candidate (short-funding-side, **fading**)"
+                    if direction == "over"
+                    else "Mean-revert candidate (long-funding-side, **squeeze setup**)"
+                )
+                msg = (
+                    f"{emoji} *{sym}* — funding {label}\n"
+                    f"z-score: `{z:+.1f}σ` vs ~30-period mean\n"
+                    f"{bias}"
+                )
+                out.append((key, "active", msg))
+            else:
+                out.append((
+                    key, "resolved",
+                    f"📊 {sym} funding deviation back within ±{z_threshold:.1f}σ ({z:+.1f}σ).",
+                ))
+    return out
+
+
 def evaluate_whale_flow_alerts(onchain_flows: list[dict], threshold_usd: float) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for flow in onchain_flows:

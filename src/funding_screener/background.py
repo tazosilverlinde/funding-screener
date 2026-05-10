@@ -31,6 +31,7 @@ from .notifications import (
     TelegramClient,
     evaluate_composite_alerts,
     evaluate_funding_alerts,
+    evaluate_funding_deviation_alerts,
     evaluate_new_listing_alerts,
     evaluate_score_delta_alerts,
     evaluate_unlock_alerts,
@@ -487,6 +488,14 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     events.extend(evaluate_score_delta_alerts(
                         combined_rows,
                         abs_threshold=int(sd.get("abs_threshold", 25)),
+                    ))
+                # Funding-deviation alerts — added Round 13. Re-uses the
+                # combined_rows that already have funding_deviation_z attached.
+                if cfg.get("funding_deviation", {}).get("enabled", True):
+                    fd = cfg["funding_deviation"]
+                    events.extend(evaluate_funding_deviation_alerts(
+                        combined_rows,
+                        z_threshold=float(fd.get("z_threshold", 2.5)),
                     ))
             except Exception as e:
                 log.warning("alerts: composite evaluator failed: %s", e)
