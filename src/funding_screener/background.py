@@ -44,6 +44,7 @@ from .notifications import (
     evaluate_new_listing_alerts,
     evaluate_oi_surge_alerts,
     evaluate_score_delta_alerts,
+    evaluate_sector_rotation_alerts,
     evaluate_unlock_alerts,
     evaluate_whale_flow_alerts,
     load_alerts_config,
@@ -606,6 +607,17 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     events.extend(evaluate_fresh_setup_alerts(
                         combined_rows,
                         min_abs_score=int(fs.get("min_abs_score", 70)),
+                    ))
+                # Sector-rotation alert — added Round 42. Builds aggregates
+                # from the same combined_rows the other evaluators see, so
+                # the rotation read stays consistent with Page 1's table.
+                if cfg.get("sector_rotation", {}).get("enabled", True):
+                    sr = cfg["sector_rotation"]
+                    sector_rows = _sector_aggregates(combined_rows)
+                    events.extend(evaluate_sector_rotation_alerts(
+                        sector_rows,
+                        threshold=int(sr.get("threshold", 30)),
+                        min_token_count=int(sr.get("min_token_count", 3)),
                     ))
                 # Funding-deviation alerts — added Round 13. Re-uses the
                 # combined_rows that already have funding_deviation_z attached.

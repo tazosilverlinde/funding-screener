@@ -401,6 +401,60 @@ def evaluate_oi_surge_alerts(
     return out
 
 
+def evaluate_sector_rotation_alerts(
+    sector_aggregate_rows,
+    threshold: int = 30,
+    min_token_count: int = 3,
+) -> list[tuple[str, str, str]]:
+    """Sector-rotation alert (Round 42).
+
+    Fires when a sector's average composite score crosses ±`threshold` AND
+    the sector has at least `min_token_count` tracked tokens (to avoid noise
+    from a 1-2 token "sector"). Catches broad rotations — when DeFi flips
+    bullish across 8 tokens at once, that's a stronger signal than any single
+    token's score crossing.
+
+    Input: list of dicts produced by sectors.sector_aggregates(combined_rows).
+    Each entry has: sector, avg_score, row_count, bullish_count, bearish_count,
+    sample_symbols.
+
+    Direction-aware keys: "sector_rot:DeFi:up" and ":down" tracked separately
+    so a sector flipping from bullish to bearish fires twice (resolved-up and
+    active-down) rather than being swallowed.
+    """
+    out: list[tuple[str, str, str]] = []
+    for s in sector_aggregate_rows or []:
+        sector = s.get("sector")
+        avg = s.get("avg_score")
+        n = s.get("row_count", 0) or 0
+        if not sector or avg is None or n < min_token_count:
+            continue
+        bull_n = s.get("bullish_count", 0) or 0
+        bear_n = s.get("bearish_count", 0) or 0
+        sample = s.get("sample_symbols") or []
+        sample_str = ", ".join(sample[:3]) if sample else ""
+
+        for direction, predicate, emoji, label in (
+            ("up", avg >= threshold, "🚀", "bullish"),
+            ("down", avg <= -threshold, "💥", "bearish"),
+        ):
+            key = f"sector_rot:{sector}:{direction}"
+            if predicate:
+                msg = (
+                    f"{emoji} *{sector}* sector turns {label}\n"
+                    f"Avg composite score `{avg:+.1f}` across {n} tokens "
+                    f"(🟢 {bull_n} bullish · 🔴 {bear_n} bearish)\n"
+                    + (f"Sample symbols: {sample_str}" if sample_str else "")
+                )
+                out.append((key, "active", msg.strip()))
+            else:
+                out.append((
+                    key, "resolved",
+                    f"📊 {sector} sector back within ±{threshold} (avg {avg:+.1f}).",
+                ))
+    return out
+
+
 def evaluate_fresh_setup_alerts(
     combined_rows,
     min_abs_score: int = 70,

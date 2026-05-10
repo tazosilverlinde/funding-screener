@@ -39,6 +39,15 @@ alerts:
     enabled: true
     min_abs_score: 70
 
+  # Sector-rotation alert (Round 42) — fires when an entire sector's average
+  # composite score crosses ±threshold. Catches broad rotations (e.g. "DeFi
+  # sector flips bullish") that individual-token alerts can miss when the
+  # move is breadth-driven rather than concentrated.
+  sector_rotation:
+    enabled: true
+    threshold: 30          # alert when |avg_score| >= this
+    min_token_count: 3     # require at least N tokens in the sector
+
   # Funding-rate deviation — fires when current funding is z >= threshold
   # away from its ~30-period mean. Mean-revert candidates: extreme overshoot
   # often precedes a cooldown; extreme undershoot precedes a squeeze.
