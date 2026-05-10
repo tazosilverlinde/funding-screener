@@ -42,32 +42,50 @@ st.caption("Read-only Binance & MEXC perpetual-futures screener. Public APIs onl
 freshness_banner(store)
 
 
+# ---- Single source of truth for the landing combined-screener rows -----------
+# Round 36 consolidation: this block used to run inside each render_* helper
+# (sentiment hero, best opportunities, daily highlights, sector rotation) —
+# four duplicate screener invocations per page render. Now compute once and
+# pass to every consumer.
+from funding_screener.screener import screen_combined_high_funding as _screen  # noqa: E402
+
+_bnb = store.read_binance()
+_mxc = store.read_mexc()
+_enrichments = store.read_enrichments()
+_onchain_flows, _ = store.read_onchain_flows()
+_onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in _onchain_flows}
+_klines_combined: dict = {}
+_klines_combined.update(_bnb.klines)
+_klines_combined.update(_mxc.klines)
+_score_histories = store.read_score_histories()
+_liq_stats_24h = store.read_liquidations(window_seconds=24 * 3600)
+# Per-symbol histograms for sparkline data (only for symbols with WS activity).
+_liq_histogram_by_symbol = {
+    sym: store.read_liquidations_histogram(sym, bin_seconds=3600, window_seconds=24 * 3600)
+    for sym in _liq_stats_24h.keys()
+}
+
+_combined_rows = _screen(
+    _bnb.funding, _mxc.funding,
+    _bnb.contracts, _mxc.contracts,
+    _enrichments,
+    threshold_percent=0.0,
+    binance_volumes=_bnb.volumes, mexc_volumes=_mxc.volumes,
+    min_volume_usd_per_side=0.0,
+    onchain_netflow_by_base=_onchain_by_base,
+    klines_by_symbol=_klines_combined,
+    score_histories=_score_histories,
+    liq_stats_by_symbol=_liq_stats_24h,
+    liq_histogram_by_symbol=_liq_histogram_by_symbol,
+)
+
+
 # ---- Market sentiment hero (Round 30) ----------------------------------------
 # Distills every tracked pair into one risk-on / risk-off read at the very top
 # of the landing page. Computed up-front because it's the most important number
 # on the page; everything below is detail.
 
-def _render_market_sentiment_hero() -> None:
-    bnb_h = store.read_binance()
-    mxc_h = store.read_mexc()
-    enrichments_h = store.read_enrichments()
-    onchain_h, _ = store.read_onchain_flows()
-    onchain_by_base_h = {f["token"]: f.get("net_usd", 0.0) for f in onchain_h}
-    klines_h: dict = {}
-    klines_h.update(bnb_h.klines)
-    klines_h.update(mxc_h.klines)
-    from funding_screener.screener import screen_combined_high_funding as _screen_hero  # noqa: E402
-    rows = _screen_hero(
-        bnb_h.funding, mxc_h.funding,
-        bnb_h.contracts, mxc_h.contracts,
-        enrichments_h,
-        threshold_percent=0.0,
-        binance_volumes=bnb_h.volumes, mexc_volumes=mxc_h.volumes,
-        min_volume_usd_per_side=0.0,
-        onchain_netflow_by_base=onchain_by_base_h,
-        klines_by_symbol=klines_h,
-        liq_stats_by_symbol=store.read_liquidations(window_seconds=24 * 3600),
-    )
+def _render_market_sentiment_hero(rows: list) -> None:
     scored = [r for r in rows if r.composite_score is not None]
     if not scored:
         return  # too early — fast loop hasn't populated enough data yet
@@ -102,7 +120,7 @@ def _render_market_sentiment_hero() -> None:
     )
 
 
-_render_market_sentiment_hero()
+_render_market_sentiment_hero(_combined_rows)
 
 
 # ---- Best opportunities widget (Round 35) -----------------------------------
@@ -111,29 +129,8 @@ _render_market_sentiment_hero()
 # directly under the sentiment hero so users see the punchy picks before
 # scrolling to longer-form sections.
 
-def _render_best_opportunities() -> None:
+def _render_best_opportunities(rows: list) -> None:
     from funding_screener.highlights import pick_best_opportunities  # noqa: E402
-    bnb_o = store.read_binance()
-    mxc_o = store.read_mexc()
-    enrichments_o = store.read_enrichments()
-    onchain_o, _ = store.read_onchain_flows()
-    onchain_by_base_o = {f["token"]: f.get("net_usd", 0.0) for f in onchain_o}
-    klines_o: dict = {}
-    klines_o.update(bnb_o.klines)
-    klines_o.update(mxc_o.klines)
-    from funding_screener.screener import screen_combined_high_funding as _screen_opp  # noqa: E402
-    rows = _screen_opp(
-        bnb_o.funding, mxc_o.funding,
-        bnb_o.contracts, mxc_o.contracts,
-        enrichments_o,
-        threshold_percent=0.0,
-        binance_volumes=bnb_o.volumes, mexc_volumes=mxc_o.volumes,
-        min_volume_usd_per_side=0.0,
-        onchain_netflow_by_base=onchain_by_base_o,
-        klines_by_symbol=klines_o,
-        score_histories=store.read_score_histories(),
-        liq_stats_by_symbol=store.read_liquidations(window_seconds=24 * 3600),
-    )
     picks = pick_best_opportunities(rows, top_n=3)
     if not picks:
         return  # Quiet market or warmup — silently skip rather than fake-empty cards.
@@ -169,7 +166,7 @@ def _render_best_opportunities() -> None:
     st.divider()
 
 
-_render_best_opportunities()
+_render_best_opportunities(_combined_rows)
 
 
 # ---- daily highlights (top of page — newspaper-style digest) ----
@@ -178,33 +175,11 @@ _render_best_opportunities()
 from funding_screener.highlights import all_highlights  # noqa: E402
 from funding_screener.unlocks import load_upcoming_unlocks  # noqa: E402
 
-_landing_bnb = store.read_binance()
-_landing_mxc = store.read_mexc()
-_landing_enrichments = store.read_enrichments()
-_landing_onchain, _ = store.read_onchain_flows()
-_landing_onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in _landing_onchain}
-_landing_klines: dict = {}
-_landing_klines.update(_landing_bnb.klines)
-_landing_klines.update(_landing_mxc.klines)
-from funding_screener.screener import screen_combined_high_funding as _screen  # noqa: E402
-
-_landing_combined = _screen(
-    _landing_bnb.funding, _landing_mxc.funding,
-    _landing_bnb.contracts, _landing_mxc.contracts,
-    _landing_enrichments,
-    threshold_percent=0.0,
-    binance_volumes=_landing_bnb.volumes, mexc_volumes=_landing_mxc.volumes,
-    min_volume_usd_per_side=0.0,
-    onchain_netflow_by_base=_landing_onchain_by_base,
-    klines_by_symbol=_landing_klines,
-    score_histories=store.read_score_histories(),
-)
-
-_landing_tradable_bases = {c.base_asset.upper() for c in _landing_bnb.contracts} | {c.base_asset.upper() for c in _landing_mxc.contracts}
+_landing_tradable_bases = {c.base_asset.upper() for c in _bnb.contracts} | {c.base_asset.upper() for c in _mxc.contracts}
 _landing_unlocks = load_upcoming_unlocks(tradable_symbols=_landing_tradable_bases)
 _landing_supply = store.read_stablecoin_supply()
 
-_highlights = all_highlights(_landing_combined, _landing_unlocks, _landing_onchain, _landing_supply)
+_highlights = all_highlights(_combined_rows, _landing_unlocks, _onchain_flows, _landing_supply)
 
 if _highlights:
     st.subheader("📰 Today's signals")
@@ -267,13 +242,11 @@ the age of each data type and the maker-fee values in use.
 
 st.divider()
 
-bnb = store.read_binance()
-mxc = store.read_mexc()
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Binance perps", len(bnb.contracts))
-c2.metric("MEXC perps", len(mxc.contracts))
-c3.metric("Binance klines cached", len(bnb.klines))
-c4.metric("MEXC klines cached", len(mxc.klines))
+c1.metric("Binance perps", len(_bnb.contracts))
+c2.metric("MEXC perps", len(_mxc.contracts))
+c3.metric("Binance klines cached", len(_bnb.klines))
+c4.metric("MEXC klines cached", len(_mxc.klines))
 
 ## ---- recent alerts feed (round 27) -----------------------------------------
 ## Shows what's fired in the last hour from the AlertLog buffer. Lands here
@@ -382,31 +355,11 @@ st.divider()
 
 ## ---- sector rotation summary -------------------------------------------------
 ## Quick read on which sectors are currently bullish vs bearish in aggregate.
-## Computed live from the same combined-screener output Page 2 uses, so what's
-## on Page 2 drives what shows here.
+## Reuses the consolidated _combined_rows from the top of the page (Round 36) —
+## no separate screener invocation.
 from funding_screener.sectors import sector_aggregates  # noqa: E402
-from funding_screener.screener import screen_combined_high_funding  # noqa: E402
 import pandas as pd  # noqa: E402
 
-bnb_for_sector = store.read_binance()
-mxc_for_sector = store.read_mexc()
-_enrichments = store.read_enrichments()
-_onchain_flows, _ = store.read_onchain_flows()
-_onchain_by_base = {f["token"]: f.get("net_usd", 0.0) for f in _onchain_flows}
-_combined_klines: dict = {}
-_combined_klines.update(bnb_for_sector.klines)
-_combined_klines.update(mxc_for_sector.klines)
-_combined_rows = screen_combined_high_funding(
-    bnb_for_sector.funding, mxc_for_sector.funding,
-    bnb_for_sector.contracts, mxc_for_sector.contracts,
-    _enrichments,
-    threshold_percent=0.0,  # no threshold so sector aggregates see every symbol
-    binance_volumes=bnb_for_sector.volumes,
-    mexc_volumes=mxc_for_sector.volumes,
-    min_volume_usd_per_side=0.0,
-    onchain_netflow_by_base=_onchain_by_base,
-    klines_by_symbol=_combined_klines,
-)
 _sector_rows = sector_aggregates(_combined_rows)
 if _sector_rows:
     st.subheader("Sector rotation — average composite score per category")
