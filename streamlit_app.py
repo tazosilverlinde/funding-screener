@@ -104,6 +104,74 @@ def _render_market_sentiment_hero() -> None:
 
 _render_market_sentiment_hero()
 
+
+# ---- Best opportunities widget (Round 35) -----------------------------------
+# Picks the top 3 actionable setups (Fresh / Building only — Mature, Late, and
+# Noisy excluded) by absolute composite score. Renders as side-by-side cards
+# directly under the sentiment hero so users see the punchy picks before
+# scrolling to longer-form sections.
+
+def _render_best_opportunities() -> None:
+    from funding_screener.highlights import pick_best_opportunities  # noqa: E402
+    bnb_o = store.read_binance()
+    mxc_o = store.read_mexc()
+    enrichments_o = store.read_enrichments()
+    onchain_o, _ = store.read_onchain_flows()
+    onchain_by_base_o = {f["token"]: f.get("net_usd", 0.0) for f in onchain_o}
+    klines_o: dict = {}
+    klines_o.update(bnb_o.klines)
+    klines_o.update(mxc_o.klines)
+    from funding_screener.screener import screen_combined_high_funding as _screen_opp  # noqa: E402
+    rows = _screen_opp(
+        bnb_o.funding, mxc_o.funding,
+        bnb_o.contracts, mxc_o.contracts,
+        enrichments_o,
+        threshold_percent=0.0,
+        binance_volumes=bnb_o.volumes, mexc_volumes=mxc_o.volumes,
+        min_volume_usd_per_side=0.0,
+        onchain_netflow_by_base=onchain_by_base_o,
+        klines_by_symbol=klines_o,
+        score_histories=store.read_score_histories(),
+        liq_stats_by_symbol=store.read_liquidations(window_seconds=24 * 3600),
+    )
+    picks = pick_best_opportunities(rows, top_n=3)
+    if not picks:
+        return  # Quiet market or warmup — silently skip rather than fake-empty cards.
+
+    st.subheader("🎯 Best opportunities right now")
+    st.caption(
+        "Top 3 highest-conviction actionable setups across all tracked pairs. "
+        "Filtered to Fresh / Building quality only — Mature setups are likely "
+        "already in motion, Late ones priced in, and Noisy ones not trustworthy. "
+        "Click a symbol to drill into its full Detail page."
+    )
+    cols = st.columns(len(picks))
+    for col, p in zip(cols, picks):
+        # Side-by-side metric cards. Score as the headline number, quality
+        # bucket as the delta caption.
+        with col:
+            st.metric(
+                p["symbol"],
+                f"{p['score']:+d}",
+                delta=p["quality"],
+                delta_color="off",  # neutral caption — emoji in label encodes mood
+                help=(
+                    f"{p['score_label']} · funding {p['funding']} · "
+                    f"signal age {p['age']}\n\n"
+                    f"Click → Detail page for full breakdown."
+                ),
+            )
+            if p.get("binance_symbol"):
+                st.markdown(
+                    f"[Open {p['symbol']} detail →]"
+                    f"(/Symbol_Detail?exchange=Binance&symbol={p['binance_symbol']})"
+                )
+    st.divider()
+
+
+_render_best_opportunities()
+
+
 # ---- daily highlights (top of page — newspaper-style digest) ----
 # Aggregates one headline from each major signal source so the user sees
 # what matters at first glance without clicking through pages.

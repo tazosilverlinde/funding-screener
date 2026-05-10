@@ -14,6 +14,60 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 
+def pick_best_opportunities(combined_rows: Iterable, top_n: int = 3) -> list[dict]:
+    """Pick the top-N highest-conviction actionable setups (Round 35).
+
+    "Actionable" = setup_quality starts with Fresh or Building. Mature is
+    intentionally excluded — by the time a setup is mature the move is
+    usually already in motion; the conviction reads "fresh" or "building"
+    are where the asymmetric edge is. Late and Noisy are also excluded.
+
+    Within the actionable set we rank by absolute composite score so a
+    +85 Fresh bull beats a +35 Fresh bull. Returns up to `top_n` rows as
+    dicts with the fields the landing page needs.
+
+    Empty list when no actionable setups exist (quiet market or warmup).
+    """
+    actionable: list = []
+    for r in (combined_rows or []):
+        score = getattr(r, "composite_score", None)
+        label = getattr(r, "setup_quality_label", None)
+        if score is None or label is None:
+            continue
+        # Quality label format: "🚀 Fresh bull", "📈 Building bear", etc.
+        if "Fresh" in label or "Building" in label:
+            actionable.append(r)
+    if not actionable:
+        return []
+    actionable.sort(key=lambda r: abs(r.composite_score), reverse=True)
+
+    out: list[dict] = []
+    for r in actionable[:top_n]:
+        sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+        # Pick a directional funding-rate string for the card.
+        bnb_pct = getattr(r, "binance_rate_8h_norm_percent", None)
+        mxc_pct = getattr(r, "mexc_rate_8h_norm_percent", None)
+        fpct = bnb_pct if bnb_pct is not None else mxc_pct
+        funding_str = f"{fpct:+.4f}%/8h" if fpct is not None else "—"
+        age_h = getattr(r, "signal_age_hours", None)
+        age_str = (
+            f"{age_h:.1f}h" if (age_h is not None and age_h >= 1.0) else
+            (f"{int(age_h * 60)}m" if age_h is not None else "—")
+        )
+        out.append({
+            "symbol": sym,
+            "base": r.base_asset,
+            "quote": r.quote_asset,
+            "score": r.composite_score,
+            "quality": r.setup_quality_label,
+            "score_label": getattr(r, "composite_short", "") or "",
+            "funding": funding_str,
+            "age": age_str,
+            "binance_symbol": r.binance_symbol,
+        })
+    return out
+
+
 def best_long_candidate(combined_rows: Iterable) -> Optional[dict]:
     """Highest composite score across all combined rows. None if no scored rows."""
     rows = [r for r in (combined_rows or []) if getattr(r, "composite_score", None) is not None]
