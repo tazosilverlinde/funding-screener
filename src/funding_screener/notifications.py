@@ -466,6 +466,61 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
     return out
 
 
+def evaluate_loop_stall_alert(
+    last_loop_ran_at,
+    expected_intervals_seconds: dict[str, float],
+    stall_multiplier: float = 3.0,
+) -> list[tuple[str, str, str]]:
+    """Loop-stall alert (Round 55).
+
+    For each loop in `expected_intervals_seconds`, checks whether more than
+    `stall_multiplier × interval` seconds have elapsed since its last cycle
+    completion. If so, fires an alert; otherwise resolves.
+
+    Per-loop key (`loop_stall:<loop_name>`) — independent state machine per
+    loop so a stalled fast loop doesn't suppress an alert for the macro loop.
+
+    Loops that have NEVER recorded a cycle (not yet started, just deployed)
+    are skipped — we can't tell stalled from not-yet-warmed-up.
+
+    Loops that we don't have an expected interval for are also skipped (no
+    alert vs false-positive trade-off).
+    """
+    import time as _t
+    out: list[tuple[str, str, str]] = []
+    if not last_loop_ran_at or not expected_intervals_seconds:
+        return out
+    now_utc_ts = _t.time()
+    # last_loop_ran_at values are datetime; convert to unix seconds.
+    for loop_name, interval_s in expected_intervals_seconds.items():
+        ran_at = last_loop_ran_at.get(loop_name)
+        if ran_at is None:
+            continue
+        try:
+            ran_at_ts = ran_at.timestamp()
+        except (AttributeError, TypeError):
+            continue
+        elapsed_s = now_utc_ts - ran_at_ts
+        threshold_s = float(interval_s) * float(stall_multiplier)
+        key = f"loop_stall:{loop_name}"
+        if elapsed_s >= threshold_s:
+            msg = (
+                f"⚠️ *Loop stalled* — `{loop_name}` hasn't completed a cycle "
+                f"in `{elapsed_s / 60:.1f} min` "
+                f"(expected ~{interval_s:.0f}s; >{stall_multiplier:.1f}× overdue).\n"
+                "Background task may be blocked on a slow RPC, network drop, "
+                "or rate-limit cooldown. Investigate the loop's recent errors."
+            )
+            out.append((key, "active", msg))
+        else:
+            out.append((
+                key, "resolved",
+                f"📊 Loop `{loop_name}` running on schedule "
+                f"(last cycle {elapsed_s:.0f}s ago).",
+            ))
+    return out
+
+
 def evaluate_memory_pressure_alert(
     rss_mb: Optional[float],
     budget_mb: float = 2048.0,

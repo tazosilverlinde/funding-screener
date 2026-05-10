@@ -58,6 +58,14 @@ alerts:
     threshold: 30          # alert when |avg_score| >= this
     min_token_count: 3     # require at least N tokens in the sector
 
+  # Loop-stall alert (Round 55) — fires when a background loop hasn't
+  # completed a cycle for `stall_multiplier × expected_interval` seconds.
+  # System-health companion to memory_pressure. Per-loop state machine so
+  # a stalled fast loop doesn't suppress an alert for the macro loop.
+  loop_stall:
+    enabled: true
+    stall_multiplier: 3.0     # alert when elapsed >= this × expected interval
+
   # Memory-pressure alert (Round 52) — fires when process RSS crosses
   # `pct_threshold`% of `budget_mb`. Closes the loop on the 2GB hard cap:
   # operators get a Telegram heads-up before the process is at risk of

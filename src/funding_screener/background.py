@@ -41,6 +41,7 @@ from .notifications import (
     evaluate_funding_alerts,
     evaluate_funding_deviation_alerts,
     evaluate_liquidation_cascade_alerts,
+    evaluate_loop_stall_alert,
     evaluate_memory_pressure_alert,
     evaluate_new_listing_alerts,
     evaluate_oi_surge_alerts,
@@ -115,6 +116,10 @@ class DataStore:
         self.score_history: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
         # Per-loop cycle durations in seconds (last 50). Drives the perf expander.
         self.loop_timings: dict[str, list[float]] = {}
+        # Wall-clock timestamp of each loop's most recent cycle completion.
+        # Driven by record_loop_duration; consumed by the loop-stall alert
+        # (Round 55) to detect silent stalls.
+        self.last_loop_ran_at: dict[str, datetime] = {}
         # 24h rolling buffer of liquidation events from the Binance forceOrder
         # WebSocket stream. Owns its own asyncio.Lock; safe to call aggregate_*
         # from any thread because the underlying deques only mutate via the WS
@@ -276,12 +281,23 @@ class DataStore:
             return list(self.score_history.get(key, []))
 
     def record_loop_duration(self, loop_name: str, duration_s: float) -> None:
-        """Append one cycle's wall-clock duration; keep last 50 per loop."""
+        """Append one cycle's wall-clock duration; keep last 50 per loop.
+
+        Also stamps `last_loop_ran_at[loop_name]` so the loop-stall alert
+        (Round 55) can detect silent stalls without each loop having to
+        register its own timestamp.
+        """
         with self._lock:
             buf = self.loop_timings.setdefault(loop_name, [])
             buf.append(duration_s)
             if len(buf) > 50:
                 buf.pop(0)
+            self.last_loop_ran_at[loop_name] = datetime.now(timezone.utc)
+
+    def read_last_loop_ran_at(self) -> dict[str, datetime]:
+        """Snapshot of {loop_name: last cycle completion timestamp}."""
+        with self._lock:
+            return dict(self.last_loop_ran_at)
 
     def read_loop_stats(self) -> dict[str, dict]:
         """Return {loop_name: {samples, avg_s, p50_s, p95_s, last_s}} for every
@@ -723,6 +739,37 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 upcoming = load_upcoming_unlocks(tradable_symbols=tradable)
                 days = int(cfg["token_unlock"].get("days_ahead", 3))
                 events.extend(evaluate_unlock_alerts(upcoming, days))
+
+            # Loop-stall alert (Round 55) — system-health companion. Detects
+            # silent stalls in any of the registered background loops.
+            if cfg.get("loop_stall", {}).get("enabled", True):
+                ls = cfg["loop_stall"]
+                # Hardcoded expected intervals per loop. Matches the sleep
+                # cadences in this file; update both together if you change
+                # one. Liquidations, daily_digest, and alerts_summary are NOT
+                # listed here:
+                #   - liquidations runs as a long-lived WS consumer (no cycle)
+                #   - daily_digest fires once per day (not periodic in the
+                #     usual sense; gated on hour_utc)
+                #   - alerts_summary ticks every 60s but only sends on its
+                #     own configured cadence; the inner work is trivial
+                _expected_intervals = {
+                    "fast": 60,
+                    "slow": 300,
+                    "market_caps": 300,
+                    "enrichment": 180,
+                    "macro": 900,
+                    "score_history": 600,
+                    "onchain.ethereum": 900,
+                    "onchain.bsc": 900,
+                    "macro_flow.ethereum": 21600,
+                    "macro_flow.bsc": 21600,
+                }
+                events.extend(evaluate_loop_stall_alert(
+                    store.read_last_loop_ran_at(),
+                    expected_intervals_seconds=_expected_intervals,
+                    stall_multiplier=float(ls.get("stall_multiplier", 3.0)),
+                ))
 
             # Memory-pressure alert (Round 52). Reads RSS once per loop tick
             # and compares against the user's hard 2GB cap. Closes the loop on
