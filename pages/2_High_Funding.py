@@ -106,12 +106,36 @@ if sector_bases:
 
 cap = int(cfg["row_limit"])
 
+# ── Quick-filter presets (Round 45) ─────────────────────────────────────────
+# Common queries as one-click radios. Each preset short-circuits the manual
+# filter sidebar — pick "None (use manual filters)" to fall back to it.
+# Presets only apply once `capped_rows` is built (after sector + cap).
+preset_choice = st.sidebar.radio(
+    "Quick filter",
+    [
+        "None (use manual filters)",
+        "🚀 Fresh longs (score ≥ +70)",
+        "💥 Fresh shorts (score ≤ -70)",
+        "📈 Building bulls (1-4h, momentum)",
+        "📉 Building bears (1-4h, momentum)",
+        "🔥 Mean-revert overshoot (z ≥ +2.5σ)",
+        "❄ Mean-revert undershoot (z ≤ -2.5σ)",
+        "🎯 Mature stable bulls (4-12h, σ ≤ 20)",
+        "⚠️ Hide all noisy + late",
+    ],
+    index=0,
+    help=(
+        "Common filter combos as one click. Selecting a preset overrides the "
+        "manual filter sidebar entirely. Use 'None' to fall back to manual."
+    ),
+)
+
 # ── Power-user filter sidebar (Round 40) ───────────────────────────────────
 # Composable filters so a user can ask "show me only Fresh setups with
 # |score| ≥ +50 and signal age ≤ 4h". All filters are off-by-default; the
 # table content with no boxes ticked matches what the page showed pre-Round-40.
 
-with st.sidebar.expander("🔎 Filters", expanded=False):
+with st.sidebar.expander("🔎 Filters (manual)", expanded=False):
     min_abs_score = st.slider(
         "Min |composite score|",
         min_value=0, max_value=100, value=0, step=5,
@@ -148,36 +172,100 @@ with st.sidebar.expander("🔎 Filters", expanded=False):
              "Set to 30 to exclude noisy regimes (same as the legacy 'Hide unstable' toggle).",
     )
 
-# Apply filters in order. Each uses None-safe predicates so a row missing
-# data passes through (we only drop on positive evidence of a violation).
 capped_rows = rows[:cap]
-if min_abs_score > 0:
-    capped_rows = [
-        r for r in capped_rows
-        if r.composite_score is not None and abs(r.composite_score) >= min_abs_score
-    ]
-if selected_qualities:
-    # setup_quality_label is "🚀 Fresh bull" etc. — match by substring on the
-    # word part so emoji differences don't break matches.
-    capped_rows = [
-        r for r in capped_rows
-        if r.setup_quality_label and any(q in r.setup_quality_label for q in selected_qualities)
-    ]
-if age_min_h > 0:
-    capped_rows = [
-        r for r in capped_rows
-        if r.signal_age_hours is not None and r.signal_age_hours >= age_min_h
-    ]
-if age_max_h > 0:
-    capped_rows = [
-        r for r in capped_rows
-        if r.signal_age_hours is not None and r.signal_age_hours <= age_max_h
-    ]
-if max_sigma > 0:
-    capped_rows = [
-        r for r in capped_rows
-        if r.composite_score_stddev_24h is None or r.composite_score_stddev_24h <= max_sigma
-    ]
+
+
+def _apply_preset(preset: str, capped: list) -> list:
+    """Filter logic for the Round 45 quick-filter radio presets.
+
+    Each preset is a small composition of the manual-filter predicates from
+    Round 40. None-safe — rows missing fields slip through where reasonable.
+    Returns the filtered list; "None (use manual filters)" returns the input
+    unchanged so the manual block below still applies.
+    """
+    if preset.startswith("🚀 Fresh longs"):
+        return [
+            r for r in capped
+            if r.composite_score is not None and r.composite_score >= 70
+            and r.setup_quality_label and "Fresh bull" in r.setup_quality_label
+        ]
+    if preset.startswith("💥 Fresh shorts"):
+        return [
+            r for r in capped
+            if r.composite_score is not None and r.composite_score <= -70
+            and r.setup_quality_label and "Fresh bear" in r.setup_quality_label
+        ]
+    if preset.startswith("📈 Building bulls"):
+        return [
+            r for r in capped
+            if r.setup_quality_label and "Building bull" in r.setup_quality_label
+        ]
+    if preset.startswith("📉 Building bears"):
+        return [
+            r for r in capped
+            if r.setup_quality_label and "Building bear" in r.setup_quality_label
+        ]
+    if preset.startswith("🔥 Mean-revert overshoot"):
+        return [
+            r for r in capped
+            if r.funding_deviation_z is not None and r.funding_deviation_z >= 2.5
+        ]
+    if preset.startswith("❄ Mean-revert undershoot"):
+        return [
+            r for r in capped
+            if r.funding_deviation_z is not None and r.funding_deviation_z <= -2.5
+        ]
+    if preset.startswith("🎯 Mature stable bulls"):
+        return [
+            r for r in capped
+            if r.setup_quality_label and "Mature bull" in r.setup_quality_label
+            and (r.composite_score_stddev_24h is None or r.composite_score_stddev_24h <= 20)
+        ]
+    if preset.startswith("⚠️ Hide all noisy + late"):
+        # "—" / no label means insufficient data — keep those (don't double-punish
+        # rows that just haven't accumulated history yet).
+        return [
+            r for r in capped
+            if not r.setup_quality_label or (
+                "Noisy" not in r.setup_quality_label and "Late" not in r.setup_quality_label
+            )
+        ]
+    return capped
+
+
+# Preset short-circuits manual filters. "None" falls through to the manual block.
+if not preset_choice.startswith("None"):
+    capped_rows = _apply_preset(preset_choice, capped_rows)
+else:
+    # Apply manual filters in order. Each uses None-safe predicates so a row
+    # missing data passes through (we only drop on positive evidence of a violation).
+    if min_abs_score > 0:
+        capped_rows = [
+            r for r in capped_rows
+            if r.composite_score is not None and abs(r.composite_score) >= min_abs_score
+        ]
+    if selected_qualities:
+        # setup_quality_label is "🚀 Fresh bull" etc. — match by substring on the
+        # word part so emoji differences don't break matches.
+        capped_rows = [
+            r for r in capped_rows
+            if r.setup_quality_label and any(q in r.setup_quality_label for q in selected_qualities)
+        ]
+    if age_min_h > 0:
+        capped_rows = [
+            r for r in capped_rows
+            if r.signal_age_hours is not None and r.signal_age_hours >= age_min_h
+        ]
+    if age_max_h > 0:
+        capped_rows = [
+            r for r in capped_rows
+            if r.signal_age_hours is not None and r.signal_age_hours <= age_max_h
+        ]
+    if max_sigma > 0:
+        capped_rows = [
+            r for r in capped_rows
+            if r.composite_score_stddev_24h is None or r.composite_score_stddev_24h <= max_sigma
+        ]
 
 # Liquidation skew per Binance symbol — pulled fresh each render. We compute
 # the label list here (in row order) and attach it to df after construction
