@@ -33,20 +33,16 @@ from typing import Any, Iterable, Optional
 import httpx
 import yaml
 
+from .chains import BSC, ETHEREUM, ChainConfig
 from .config import http_client_kwargs, settings
 
 # `Transfer(address indexed from, address indexed to, uint256 value)` event signature.
+# Same on every EVM chain.
 _TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-# Multiple public RPCs — we fall through them on 429s / errors. All free, no keys.
-_DEFAULT_RPCS = [
-    "https://ethereum-rpc.publicnode.com",
-    "https://eth.drpc.org",
-    "https://cloudflare-eth.com",
-    "https://eth.llamarpc.com",
-    "https://rpc.ankr.com/eth",
-]
-# 24h on Ethereum at ~12s/block.
-_BLOCKS_PER_24H = 7200
+
+# Backward-compatible defaults (the original Ethereum-only constants).
+_DEFAULT_RPCS = list(ETHEREUM.rpc_urls)
+_BLOCKS_PER_24H = ETHEREUM.blocks_per_24h
 
 _log = logging.getLogger(__name__)
 
@@ -68,36 +64,39 @@ def _pad_address(addr: str) -> str:
     return "0x" + ("0" * (64 - len(a))) + a
 
 
-def load_exchange_wallets() -> dict[str, list[str]]:
-    """Returns {exchange_name: [lowercase 0x addresses]} for the ETH chain."""
+def load_exchange_wallets(chain: str = "ethereum") -> dict[str, list[str]]:
+    """Returns {exchange_name: [lowercase 0x addresses]} for the given chain.
+
+    Default is "ethereum" for backward compatibility. Add new chains to
+    `config/exchange_wallets.yaml` under their own top-level key.
+    """
     path = _config_dir() / "exchange_wallets.yaml"
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    eth = (data.get("ethereum") or {})
+    chain_data = (data.get(chain) or {})
     out: dict[str, list[str]] = {}
-    for exchange, wallets in eth.items():
+    for exchange, wallets in chain_data.items():
         if not isinstance(wallets, list):
             continue
         out[exchange] = [w.lower() for w in wallets if isinstance(w, str)]
     return out
 
 
-def load_non_whale_addresses() -> set[str]:
-    """Load `config/non_whale_addresses.yaml` and flatten every category into
-    one lowercase set. Used by the whale-flow tracker to filter out routine
-    DEX-router / bridge / protocol traffic that would otherwise look like
-    whale activity by size.
+def load_non_whale_addresses(chain: str = "ethereum") -> set[str]:
+    """Load `config/non_whale_addresses.yaml` for `chain` and flatten every
+    category into one lowercase set. Used by the whale-flow tracker to filter
+    out routine DEX-router / bridge / protocol traffic.
     """
     path = _config_dir() / "non_whale_addresses.yaml"
     if not path.exists():
         return set()
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-    eth = (data.get("ethereum") or {})
+    chain_data = (data.get(chain) or {})
     out: set[str] = set()
-    for _category, addrs in eth.items():
+    for _category, addrs in chain_data.items():
         if not isinstance(addrs, list):
             continue
         for a in addrs:
@@ -106,16 +105,19 @@ def load_non_whale_addresses() -> set[str]:
     return out
 
 
-def load_eth_token_contracts() -> dict[str, TokenInfo]:
-    """Returns {SYMBOL_UPPER: TokenInfo} from config/eth_token_contracts.yaml."""
+def load_eth_token_contracts(chain: str = "ethereum") -> dict[str, TokenInfo]:
+    """Returns {SYMBOL_UPPER: TokenInfo} from `config/eth_token_contracts.yaml`
+    for the given chain. Despite the legacy filename it now holds multi-chain
+    sections — top-level keys = chain names.
+    """
     path = _config_dir() / "eth_token_contracts.yaml"
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    eth = (data.get("ethereum") or {})
+    chain_data = (data.get(chain) or {})
     out: dict[str, TokenInfo] = {}
-    for sym, info in eth.items():
+    for sym, info in chain_data.items():
         if not isinstance(info, dict):
             continue
         addr = info.get("address")
@@ -127,22 +129,27 @@ def load_eth_token_contracts() -> dict[str, TokenInfo]:
     return out
 
 
-class EthOnchainClient:
-    """Minimal Ethereum JSON-RPC client.
+class EvmOnchainClient:
+    """Minimal EVM JSON-RPC client (Ethereum, BSC, etc.).
 
     Uses a list of public RPC endpoints (no API keys). Each request walks the
     list and keeps trying the next one on 429 or transient error — gives us
     surprisingly good uptime without any signup.
-    """
 
-    name = "EthOnchain"
+    The client is chain-agnostic — pass a ChainConfig from chains.py to target
+    a specific network. Defaults to Ethereum mainnet for backward compatibility.
+    """
 
     def __init__(
         self,
+        chain: ChainConfig | None = None,
         rpc_urls: list[str] | None = None,
         http: httpx.AsyncClient | None = None,
     ) -> None:
-        self._rpc_urls = list(rpc_urls or _DEFAULT_RPCS)
+        self.chain = chain or ETHEREUM
+        self.name = f"EvmOnchain[{self.chain.name}]"
+        # Explicit rpc_urls override the chain's defaults — used by tests/forks.
+        self._rpc_urls = list(rpc_urls or self.chain.rpc_urls)
         if http is None:
             kwargs = http_client_kwargs()
             # Block-range RPC queries can be slow; allow generous read timeout.
@@ -197,8 +204,8 @@ class EthOnchainClient:
         from_topic_filter: list[str] | None = None,
         to_topic_filter: list[str] | None = None,
     ) -> list[dict]:
-        """Fetch ERC-20 Transfer events for a token in a block range, optionally
-        filtered by `from` (topic[1]) or `to` (topic[2]) address sets.
+        """Fetch ERC-20/BEP-20 Transfer events for a token in a block range,
+        optionally filtered by `from` (topic[1]) or `to` (topic[2]) address sets.
         """
         topics: list = [_TRANSFER_TOPIC]
         topics.append(from_topic_filter if from_topic_filter is not None else None)
@@ -211,6 +218,10 @@ class EthOnchainClient:
         }]
         result = await self._rpc("eth_getLogs", params)
         return result if isinstance(result, list) else []
+
+
+# Backward-compat alias — old callers using "EthOnchainClient(...)" still work.
+EthOnchainClient = EvmOnchainClient
 
 
 def parse_transfer_log(log: dict, decimals: int) -> tuple[str, str, float]:
@@ -230,7 +241,7 @@ def parse_transfer_log(log: dict, decimals: int) -> tuple[str, str, float]:
 
 
 async def compute_token_netflow(
-    client: EthOnchainClient,
+    client: EvmOnchainClient,
     token: TokenInfo,
     exchange_wallets: dict[str, list[str]],
     blocks_back: int,
@@ -350,7 +361,7 @@ async def compute_token_netflow(
 
 
 async def compute_daily_netflow_history(
-    client: EthOnchainClient,
+    client: EvmOnchainClient,
     token: TokenInfo,
     exchange_wallets: dict[str, list[str]],
     days: int,
@@ -383,10 +394,12 @@ async def compute_daily_netflow_history(
         return []
 
     out: list[dict] = []
+    # Use the client's own chain blocks_per_24h so this works for both ETH and BSC.
+    blocks_per_day = client.chain.blocks_per_24h if hasattr(client, "chain") else _BLOCKS_PER_24H
     for day_offset in range(days, 0, -1):
         # day_offset=days → oldest day; day_offset=1 → today.
-        from_block = max(0, latest - day_offset * _BLOCKS_PER_24H)
-        to_block = max(0, latest - (day_offset - 1) * _BLOCKS_PER_24H)
+        from_block = max(0, latest - day_offset * blocks_per_day)
+        to_block = max(0, latest - (day_offset - 1) * blocks_per_day)
         try:
             deposits_logs = await client.get_transfer_logs(
                 token.address, from_block, to_block, to_topic_filter=padded_all,

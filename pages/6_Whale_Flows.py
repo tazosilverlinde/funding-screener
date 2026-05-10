@@ -1,9 +1,13 @@
 """Page 6 — Exchange flows: 24h netflow per token (our own implementation).
 
+Multi-chain (Round 10): scans Ethereum AND BNB Chain in parallel, two
+independent loops with their own RPC fallback lists. Every row carries a
+`chain` field so the user can filter by chain or see them merged.
+
 Built on top of:
-  - Public Ethereum JSON-RPC (no API key)
-  - `config/exchange_wallets.yaml` — labeled CEX hot/cold wallets
-  - `config/eth_token_contracts.yaml` — ERC-20 contract addresses we know
+  - Public EVM JSON-RPC for each chain (no API keys, public free endpoints)
+  - `config/exchange_wallets.yaml` — labeled CEX hot/cold wallets per chain
+  - `config/eth_token_contracts.yaml` — ERC-20/BEP-20 contract addresses
 
 Filtered to tokens that have a Binance or MEXC futures contract, so every row
 is something the user can actually trade.
@@ -75,10 +79,37 @@ else:
 if not flows:
     st.stop()
 
-# Build a flat table.
+# Per-chain freshness — surfaces which chain is lagging.
+by_chain = store.read_onchain_flows_by_chain()
+if len(by_chain) > 1:
+    cols = st.columns(len(by_chain))
+    from datetime import datetime, timezone as _tz
+    for i, (chain_name, (chain_flows, chain_at)) in enumerate(sorted(by_chain.items())):
+        if chain_at:
+            age_s = int((datetime.now(_tz.utc) - chain_at).total_seconds())
+            label = f"{age_s}s ago" if age_s < 60 else f"{age_s // 60}m ago"
+        else:
+            label = "no data yet"
+        cols[i].metric(f"{chain_name.upper()} flows", f"{len(chain_flows)} tokens", label)
+
+# Chain filter — when both ETH and BSC have flows, lets the user narrow to one.
+chain_options = sorted({r.get("chain", "ethereum") for r in flows})
+if len(chain_options) > 1:
+    selected_chains = st.multiselect(
+        "Chains",
+        chain_options,
+        default=chain_options,
+        format_func=lambda c: {"ethereum": "Ethereum", "bsc": "BNB Chain"}.get(c, c.title()),
+        help="Filter rows by source chain. Token symbols can appear on multiple chains "
+             "(e.g. USDT on ETH AND BSC) — both will show as separate rows.",
+    )
+    flows = [r for r in flows if r.get("chain", "ethereum") in selected_chains]
+
+# Build a flat table — Chain column included so duplicates across chains are clear.
 df = pd.DataFrame([
     {
         "Signal": f"{r['signal_emoji']} {r['signal_short']}",
+        "Chain": r.get("chain", "ethereum").upper(),
         "Token": r["token"],
         "Net (USD)": r["net_usd"],
         "Deposits (USD)": r["deposits_usd"],
@@ -104,6 +135,12 @@ st.dataframe(
                 "🔴 Heavy distribution — same, with |net| > 50% of total.\n"
                 "🟡 Neutral — |net| < $250K, below the noise floor."
             ),
+        ),
+        "Chain": st.column_config.TextColumn(
+            "Chain",
+            help="Source chain — ETHEREUM (most blue-chips, USDT/USDC native), "
+                 "BSC (Binance-Peg wrapped versions: BTCB ≈ BTC, ETH-on-BSC). "
+                 "A token can appear on both chains as separate rows.",
         ),
         "Token": st.column_config.TextColumn("Token", help="Symbol matching the Binance/MEXC futures ticker."),
         "Net (USD)": st.column_config.NumberColumn(
@@ -213,6 +250,7 @@ for r in flows:
     )
     whale_rows.append({
         "Signal": f"{emoji} {short}",
+        "Chain": r.get("chain", "ethereum").upper(),
         "Token": r["token"],
         "Whale net (USD)": wn,
         "Whale withdrawals (USD)": ww,
@@ -352,20 +390,23 @@ st.divider()
 st.markdown(
     """
 **Honest limitations:**
-- **ETH chain only.** Tokens whose primary chain is Solana, BNB, TRON, etc. show no rows
-  (BTC, SOL, BNB, XRP, DOGE, ADA, AVAX, MATIC, TON, …).
+- **EVM chains only (Ethereum + BNB Chain).** Solana, TRON, Bitcoin native, Cosmos,
+  etc. need their own RPC clients (different log format) — not yet supported.
 - **Wallet coverage** — `config/exchange_wallets.yaml` has the major Binance/MEXC/OKX/
-  Bybit/Coinbase/Kraken hot wallets, but not every wallet of every exchange. Adding a
-  missing wallet just makes the netflow more accurate.
+  Bybit/Coinbase/Kraken hot wallets per chain, but not every wallet of every exchange.
+  Adding a missing wallet just makes the netflow more accurate.
 - **Whale auto-discovery** — every wallet that moves > $500K to/from an exchange counts
   as a whale; we don't need a curated list. The exclusion list in
   `config/non_whale_addresses.yaml` filters out routine plumbing (DEX routers, bridges,
   market makers). Adding to that file just removes more noise; it never hides real whales.
 - **Internal exchange shuffling** — when an exchange moves between its own wallets, both
   endpoints are in our list and we cancel the flow out. So Binance-to-Binance moves
-  correctly net to zero.
-- **Token coverage** — `config/eth_token_contracts.yaml` has top ~25 tokens with both a
-  Binance/MEXC futures contract AND an ERC-20 contract. Add to YAML to track more.
+  correctly net to zero (per chain).
+- **Cross-chain duplicates** — USDT, USDC, BTC etc. appear on both ETH and BSC as
+  separate rows; they're not summed (different on-chain liquidity pools, different
+  whale audiences). Use the Chains filter above to focus on one.
+- **Macro flows below are still ETH-only** — adding BSC to the macro chart is on the
+  roadmap but requires a separate per-chain layout (different liquidity dynamics).
 """
 )
 

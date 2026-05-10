@@ -58,3 +58,36 @@ ethereum:
     - "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0"  # Kraken 4
     - "0xfa52274dd61e1643d2205169732f29114bc240b3"  # Kraken 5
     - "0x53d284357ec70ce289d6d64134dfac8e511c8a3d"  # Kraken
+
+# BNB Chain (BSC) — added Round 10. Many exchange wallets are multi-chain
+# (same address, different chain) so several entries below match the ETH list.
+# Verify each on bscscan.com — the exchange label appears in the top-right of
+# the address page when present.
+bsc:
+  binance:
+    - "0x8894e0a0c962cb723c1976a4421c95949be2d4e3"  # Binance hot wallet (BSC)
+    - "0xe2fc31f816a9b94326492132018c3aecc4a93ae1"  # Binance hot wallet 2 (BSC)
+    - "0xf977814e90da44bfa03b6295a0616a897441acec"  # Binance 8 (multi-chain)
+    - "0x3c783c21a0383057d128bae431894a5c19f9cf06"  # Binance hot wallet 3 (BSC)
+    - "0x5a52e96bacdabb82fd05763e25335261b270efcb"  # Binance peg/deployer
+    - "0x73f5ebe90f27b46ea12e5795d16c4b408b19cc6f"  # Binance hot wallet 4 (BSC)
+    - "0xdccf3b77da55107280bd850ea519df3705d1a75a"  # Binance peg deposit
+
+  okx:
+    - "0xa7efae728d2936e78bda97dc267687568dd593f3"  # OKX (multi-chain)
+    - "0x6cc5f688a315f3dc28a7781717a9a798a59fda7b"  # OKX (multi-chain)
+    - "0xc882b111a75c0c657fc507c04fbfcd2cc984f071"  # OKX BSC
+
+  bybit:
+    - "0xf89d7b9c864f589bbf53a82105107622b35eaa40"  # Bybit (multi-chain)
+    - "0xee5b5b923ffce93a870b3104b7ca09c3db80047a"  # Bybit hot (multi-chain)
+
+  mexc:
+    - "0x4982085c9e2f89f2ecb8131eca71afad896e89cb"  # MEXC BSC hot
+    - "0x9642b23ed1e01df1092b92641051881a322f5d4e"  # MEXC (multi-chain)
+
+  kucoin:
+    - "0x58edF78281334335EfFa23101bBe3371b6a36A51"  # KuCoin BSC
+
+  gate:
+    - "0x0d0707963952f2fba59dd06f2b425ace40b492fe"  # Gate.io (multi-chain)

@@ -39,6 +39,7 @@ from .notifications import (
 )
 from .onchain import (
     EthOnchainClient,
+    EvmOnchainClient,
     classify_netflow_signal,
     compute_daily_netflow_history,
     compute_token_netflow,
@@ -74,7 +75,11 @@ class DataStore:
         self.market_caps_usd: dict[str, float] = {}  # base_asset upper → USD mcap
         self.enrichments: dict[tuple[str, str], EnrichmentData] = {}  # (exchange, symbol) → enrichment
         self.stablecoin_supply: dict[str, dict[str, float]] = {}  # macro: USDT/USDC/TOTAL supply
-        self.onchain_flows: list[dict] = []  # Per-token 24h exchange netflow
+        # Per-token 24h exchange netflow, keyed by chain name (e.g. "ethereum",
+        # "bsc"). Each chain's loop writes its own slice. read_onchain_flows()
+        # flattens to one cross-chain list — every row has a "chain" field.
+        self.onchain_flows_by_chain: dict[str, list[dict]] = {}
+        self.last_onchain_by_chain: dict[str, datetime] = {}
         # 7-day daily exchange netflow for stables + BTC + ETH (USDT/USDC/WBTC/WETH).
         # Shape: {symbol: list[{"date": ..., "deposits_usd": ..., "withdrawals_usd": ..., "net_usd": ...}]}
         self.macro_daily_flows: dict[str, list[dict]] = {}
@@ -88,7 +93,6 @@ class DataStore:
         self.last_market_caps_at: Optional[datetime] = None
         self.last_enrichment_at: Optional[datetime] = None
         self.last_macro_at: Optional[datetime] = None
-        self.last_onchain_at: Optional[datetime] = None
         self.last_macro_flows_at: Optional[datetime] = None
         self.last_score_snapshot_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
@@ -146,14 +150,36 @@ class DataStore:
         with self._lock:
             return {k: dict(v) for k, v in self.stablecoin_supply.items()}
 
-    def update_onchain_flows(self, flows: list[dict]) -> None:
+    def update_onchain_flows(self, chain: str, flows: list[dict]) -> None:
+        """Replace the chain's slice. Each flow row is expected to carry the
+        chain name in its "chain" field — we don't add it here.
+        """
         with self._lock:
-            self.onchain_flows = flows
-            self.last_onchain_at = datetime.now(timezone.utc)
+            self.onchain_flows_by_chain[chain] = list(flows)
+            self.last_onchain_by_chain[chain] = datetime.now(timezone.utc)
 
     def read_onchain_flows(self) -> tuple[list[dict], Optional[datetime]]:
+        """Return flat cross-chain list (each row has a "chain" field) and the
+        oldest timestamp across chains so the freshness banner reflects the
+        slowest one. None when no chain has ever reported.
+        """
         with self._lock:
-            return list(self.onchain_flows), self.last_onchain_at
+            combined: list[dict] = []
+            for flows in self.onchain_flows_by_chain.values():
+                combined.extend(flows)
+            timestamps = list(self.last_onchain_by_chain.values())
+            oldest = min(timestamps) if timestamps else None
+        return combined, oldest
+
+    def read_onchain_flows_by_chain(self) -> dict[str, tuple[list[dict], Optional[datetime]]]:
+        """Return {chain_name: (flows, last_at)} so the page can show per-chain
+        freshness or filter by chain.
+        """
+        with self._lock:
+            return {
+                chain: (list(flows), self.last_onchain_by_chain.get(chain))
+                for chain, flows in self.onchain_flows_by_chain.items()
+            }
 
     def update_macro_daily_flows(self, data: dict[str, list[dict]]) -> None:
         with self._lock:
@@ -631,20 +657,27 @@ async def _macro_flow_loop(store: DataStore, eth_client: EthOnchainClient) -> No
         await asyncio.sleep(interval)
 
 
-async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
-    """ETH on-chain exchange-flow scanner — every 15 minutes.
+async def _onchain_loop(store: DataStore, client: EvmOnchainClient) -> None:
+    """On-chain exchange-flow scanner for one EVM chain — every 15 minutes.
 
-    Filters our token universe down to tokens that are (a) listed in
-    `config/eth_token_contracts.yaml`, AND (b) have a Binance or MEXC futures
-    contract. For each one, fetches 24h Transfer events to/from labeled
-    exchange wallets and computes USD-denominated netflow.
+    Filters our token universe down to tokens that are (a) listed under this
+    chain in `config/eth_token_contracts.yaml`, AND (b) have a Binance or MEXC
+    futures contract. For each one, fetches 24h Transfer events to/from
+    labeled exchange wallets and computes USD-denominated netflow.
+
+    Multi-chain: one task per chain, each with its own EvmOnchainClient. The
+    chain identity flows from `client.chain.name` — used to load the right
+    YAML slices, label flows, and key per-chain timing/freshness.
     """
+    chain = client.chain
+    chain_name = chain.name
+    timing_key = f"onchain.{chain_name}"
     interval = 900
-    exchange_wallets = load_exchange_wallets()
-    contracts_by_symbol = load_eth_token_contracts()
-    non_whale_addresses = load_non_whale_addresses()
+    exchange_wallets = load_exchange_wallets(chain_name)
+    contracts_by_symbol = load_eth_token_contracts(chain_name)
+    non_whale_addresses = load_non_whale_addresses(chain_name)
     if not exchange_wallets or not contracts_by_symbol:
-        log.warning("Onchain loop disabled — wallet or token YAML is empty")
+        log.warning("Onchain loop disabled for %s — wallet or token YAML is empty", chain_name)
         return
 
     # Wait for the fast loop to populate funding/contracts (we need price + universe).
@@ -668,7 +701,9 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
             )
 
             # Build symbol → mark price (USD) lookup. Prefer Binance USDT perp,
-            # fall back to MEXC USDT perp, then to Binance USDC.
+            # fall back to MEXC USDT perp, then to Binance USDC. BSC pegged
+            # tokens reuse the underlying mainnet symbol's price (BTCB → BTC,
+            # ETH-on-BSC → ETH) — see explicit mappings below.
             price_map: dict[str, float] = {}
             for r in bnb.funding:
                 if r.quote_asset == "USDT" and r.mark_price:
@@ -679,29 +714,28 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
             for r in bnb.funding:
                 if r.quote_asset == "USDC" and r.mark_price:
                     price_map.setdefault(r.base_asset.upper(), r.mark_price)
+            # Stables ≈ $1; pegged proxies follow their underlying.
+            price_map.setdefault("USDT", 1.0)
+            price_map.setdefault("USDC", 1.0)
+            price_map.setdefault("BTCB", price_map.get("BTC", 0.0))  # BSC BTC proxy
 
-            # MEXC contracts don't carry mark_price in our funding rows; if a
-            # token only trades on MEXC, fall back to its 24h ticker via the
-            # market-cap cache (price implied by mcap/supply isn't available
-            # here, so we just skip — user gets fewer rows but no wrong USD).
-
-            # Strictly sequential — each token does 2 RPC calls inside, parallelising
+            # Strictly sequential — each token does 2 RPC calls inside; parallelising
             # at this layer too would burn through the public RPC rate limits.
             results: list = []
             for token in tradable_tokens:
                 try:
                     res = await compute_token_netflow(
-                        eth_client,
+                        client,
                         token,
                         exchange_wallets,
-                        blocks_back=_BLOCKS_PER_24H,
+                        blocks_back=chain.blocks_per_24h,
                         price_usd=price_map.get(token.symbol),
                         non_whale_addresses=non_whale_addresses,
                         whale_threshold_usd=500_000.0,
                     )
                     results.append(res)
                 except Exception as e:
-                    log.warning("Onchain compute failed for %s: %s", token.symbol, e)
+                    log.warning("Onchain compute failed for %s/%s: %s", chain_name, token.symbol, e)
                 # Pace token-to-token to be RPC-friendly.
                 await asyncio.sleep(0.5)
             flows: list[dict] = []
@@ -713,13 +747,14 @@ async def _onchain_loop(store: DataStore, eth_client: EthOnchainClient) -> None:
                     )
                     r["signal_emoji"] = emoji
                     r["signal_short"] = short
+                    r["chain"] = chain_name  # tag for cross-chain page rendering
                     flows.append(r)
             flows.sort(key=lambda r: r["net_usd"], reverse=True)
-            store.update_onchain_flows(flows)
+            store.update_onchain_flows(chain_name, flows)
         except Exception as e:
-            log.exception("onchain loop error")
-            store.record_error(f"onchain: {type(e).__name__}: {e}")
-        store.record_loop_duration("onchain", _t.monotonic() - cycle_start)
+            log.exception("onchain loop error (%s)", chain_name)
+            store.record_error(f"onchain[{chain_name}]: {type(e).__name__}: {e}")
+        store.record_loop_duration(timing_key, _t.monotonic() - cycle_start)
         await asyncio.sleep(interval)
 
 
@@ -921,7 +956,13 @@ def _runner() -> None:
     mexc = MexcClient()
     mcap_client = CoinPaprikaClient()
     llama = DefiLlamaClient()
-    eth_chain = EthOnchainClient()
+    # One EVM client per chain — each owns its own RPC fallback list. Macro
+    # flow keeps using the ETH client (stables/BTC/ETH liquidity is biggest there).
+    from .chains import ALL_CHAINS
+    chain_clients: dict[str, EvmOnchainClient] = {
+        name: EvmOnchainClient(cfg) for name, cfg in ALL_CHAINS.items()
+    }
+    eth_chain = chain_clients["ethereum"]
     telegram = TelegramClient()
     _runner_state["binance"] = binance
     _runner_state["mexc"] = mexc
@@ -932,20 +973,24 @@ def _runner() -> None:
         loop.create_task(_market_caps_loop(_store, mcap_client))
         loop.create_task(_enrichment_loop(_store, binance, mexc))
         loop.create_task(_macro_loop(_store, llama))
-        loop.create_task(_onchain_loop(_store, eth_chain))
+        # Onchain task per chain — runs in parallel; each chain has its own RPC
+        # fallback list so a slow BSC node won't block ETH.
+        for chain_name, client in chain_clients.items():
+            loop.create_task(_onchain_loop(_store, client))
         loop.create_task(_macro_flow_loop(_store, eth_chain))
         loop.create_task(_score_history_loop(_store))
         loop.create_task(_alerts_loop(_store, telegram))
         loop.run_forever()
     finally:
         try:
+            close_calls = [
+                binance.aclose(), mexc.aclose(),
+                mcap_client.aclose(), llama.aclose(),
+                telegram.aclose(),
+            ]
+            close_calls.extend(c.aclose() for c in chain_clients.values())
             loop.run_until_complete(
-                asyncio.gather(
-                    binance.aclose(), mexc.aclose(),
-                    mcap_client.aclose(), llama.aclose(), eth_chain.aclose(),
-                    telegram.aclose(),
-                    return_exceptions=True,
-                )
+                asyncio.gather(*close_calls, return_exceptions=True)
             )
         except Exception:
             pass
