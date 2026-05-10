@@ -232,6 +232,70 @@ def evaluate_funding_deviation_alerts(
     return out
 
 
+def evaluate_liquidation_cascade_alerts(
+    stats_by_symbol: dict[str, dict],
+    cascade_threshold_usd: float = 50_000_000,
+    single_threshold_usd: float = 10_000_000,
+) -> list[tuple[str, str, str]]:
+    """Liquidation-cascade + big-single-event alerts (Round 15).
+
+    Two distinct signals on each symbol — tracked separately so they don't
+    suppress one another:
+
+      - cascade: total liquidated $ in the aggregation window exceeds
+        `cascade_threshold_usd`. Direction (long/short dominant) is encoded
+        in the message but NOT the key — a cascade is a cascade regardless of
+        which side dominated; if it flips direction we'd want a fresh ping.
+      - single: the biggest single liquidation in the window exceeds
+        `single_threshold_usd`. Catches one whale getting blown out even
+        when total is otherwise quiet.
+
+    Caller passes the per-symbol stats dict from
+    `LiquidationsBuffer.aggregate_all()`; we don't fetch anything here.
+    """
+    out: list[tuple[str, str, str]] = []
+    for symbol, stats in (stats_by_symbol or {}).items():
+        total = stats.get("total_usd", 0.0) or 0.0
+        long_usd = stats.get("long_liq_usd", 0.0) or 0.0
+        short_usd = stats.get("short_liq_usd", 0.0) or 0.0
+        biggest = stats.get("biggest_single_usd", 0.0) or 0.0
+        biggest_side = stats.get("biggest_single_side") or "—"
+
+        cascade_key = f"liq_cascade:{symbol}"
+        if total >= cascade_threshold_usd:
+            if long_usd > short_usd:
+                bias = "🔴 *Longs liquidated dominantly* — typically follows a sharp drop"
+            elif short_usd > long_usd:
+                bias = "🟢 *Shorts liquidated dominantly* — squeeze in progress"
+            else:
+                bias = "🟡 Balanced cascade"
+            msg = (
+                f"💥 *{symbol}* — liquidation cascade\n"
+                f"Total: `${total / 1e6:,.1f}M`  |  Longs: `${long_usd / 1e6:,.1f}M`  "
+                f"|  Shorts: `${short_usd / 1e6:,.1f}M`\n"
+                f"{bias}"
+            )
+            out.append((cascade_key, "active", msg))
+        else:
+            out.append((
+                cascade_key, "resolved",
+                f"📊 {symbol} liquidation cascade subsided (${total / 1e6:.1f}M total).",
+            ))
+
+        single_key = f"liq_single:{symbol}"
+        if biggest >= single_threshold_usd:
+            who = "long" if biggest_side == "long" else "short"
+            msg = (
+                f"💣 *{symbol}* — single big liquidation\n"
+                f"`${biggest / 1e6:,.1f}M` {who} position blown out\n"
+                "One trader, possibly a fund, got force-closed."
+            )
+            out.append((single_key, "active", msg))
+        else:
+            out.append((single_key, "resolved", f"📊 {symbol} no large single-liq events."))
+    return out
+
+
 def evaluate_whale_flow_alerts(onchain_flows: list[dict], threshold_usd: float) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for flow in onchain_flows:

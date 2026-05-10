@@ -527,6 +527,35 @@ if exchange == "Binance":
         st.markdown(
             "💡 **No risk flags right now.** Mark/index in line, OI stable, L/S ratio in normal range."
         )
+
+    # ── Liquidation snapshot for THIS symbol — added Round 15 ─────────────
+    liq_stats = store.read_liquidations(symbol=symbol_q, window_seconds=24 * 3600)
+    if liq_stats and liq_stats.get("events_count", 0) > 0:
+        st.write("**Liquidations — last 24h** (Binance forceOrder stream)")
+        l1, l2, l3, l4 = st.columns(4)
+        l1.metric(
+            "Total liq ($)",
+            f"${liq_stats['total_usd'] / 1e6:.2f}M",
+            help="Sum of long + short liquidations in the last 24h.",
+        )
+        l2.metric(
+            "Long liq ($)",
+            f"${liq_stats['long_liq_usd'] / 1e6:.2f}M",
+            help="Notional of LONG positions force-liquidated. Spikes follow sharp drops.",
+        )
+        l3.metric(
+            "Short liq ($)",
+            f"${liq_stats['short_liq_usd'] / 1e6:.2f}M",
+            help="Notional of SHORT positions force-liquidated. Spikes follow squeezes.",
+        )
+        biggest_label = (liq_stats.get("biggest_single_side") or "—").title()
+        l4.metric(
+            "Biggest single ($)",
+            f"${liq_stats['biggest_single_usd'] / 1e6:.2f}M",
+            f"{biggest_label} side" if biggest_label != "—" else None,
+            help="Largest single liquidation event in the window. "
+                 "Outsized values often signal one large fund getting blown out.",
+        )
 else:
     st.info(
         "MEXC's public API doesn't expose mark/index spread, OI history, or L/S ratio for individual contracts. "

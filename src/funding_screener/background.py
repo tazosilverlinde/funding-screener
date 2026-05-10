@@ -32,6 +32,7 @@ from .notifications import (
     evaluate_composite_alerts,
     evaluate_funding_alerts,
     evaluate_funding_deviation_alerts,
+    evaluate_liquidation_cascade_alerts,
     evaluate_new_listing_alerts,
     evaluate_score_delta_alerts,
     evaluate_unlock_alerts,
@@ -534,6 +535,17 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
             if cfg.get("whale_flow", {}).get("enabled", True):
                 thr_usd = float(cfg["whale_flow"].get("threshold_usd", 20_000_000))
                 events.extend(evaluate_whale_flow_alerts(onchain_flows, thr_usd))
+
+            # Liquidation cascades + big single events — added Round 15.
+            if cfg.get("liquidations", {}).get("enabled", True):
+                lc = cfg["liquidations"]
+                window_s = int(lc.get("window_seconds", 3600))
+                liq_stats = store.read_liquidations(window_seconds=window_s)
+                events.extend(evaluate_liquidation_cascade_alerts(
+                    liq_stats,
+                    cascade_threshold_usd=float(lc.get("cascade_threshold_usd", 50_000_000)),
+                    single_threshold_usd=float(lc.get("single_threshold_usd", 10_000_000)),
+                ))
 
             # New listings — skip the FIRST iteration so we don't fire one alert per existing contract.
             if cfg.get("new_listing", {}).get("enabled", True):

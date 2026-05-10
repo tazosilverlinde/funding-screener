@@ -54,6 +54,14 @@ alerts:
     enabled: true
     threshold_usd: 20_000_000
 
+  # Liquidation cascades + big single events. The window controls how recent
+  # the data has to be — 1h ≈ "right now", 6h ≈ "this trading session".
+  liquidations:
+    enabled: true
+    window_seconds: 3600
+    cascade_threshold_usd: 50_000_000   # alert when total liq in window >= this
+    single_threshold_usd: 10_000_000    # alert when one event >= this notional
+
   # New listing detected (any new perp contract on Binance or MEXC).
   new_listing:
     enabled: true
