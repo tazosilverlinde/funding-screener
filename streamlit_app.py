@@ -144,6 +144,68 @@ c2.metric("MEXC perps", len(mxc.contracts))
 c3.metric("Binance klines cached", len(bnb.klines))
 c4.metric("MEXC klines cached", len(mxc.klines))
 
+## ---- recent alerts feed (round 27) -----------------------------------------
+## Shows what's fired in the last hour from the AlertLog buffer. Lands here
+## above the Top Movers because "what just happened" is more time-sensitive
+## than "biggest moves over a longer window".
+import time as _t  # noqa: E402
+
+_alert_log = store.alert_log
+_recent_window_s = 3600  # 1h
+_now_ts = _t.time()
+_recent_alerts = [
+    r for r in _alert_log.recent(limit=200)
+    if (_now_ts - r.fired_at) <= _recent_window_s
+]
+if _recent_alerts:
+    st.subheader(f"🚨 Recent alerts — last hour ({len(_recent_alerts)})")
+    st.caption(
+        "Live feed of every alert that fired in the last 60 minutes. "
+        "Active = condition crossed into the alert region; resolved = condition "
+        "cleared. Mute noisy kinds on Page 11."
+    )
+    _alert_rows = []
+    for r in _recent_alerts[:10]:  # cap landing-page list at 10
+        _age_s = int(_now_ts - r.fired_at)
+        _age_str = f"{_age_s}s" if _age_s < 60 else f"{_age_s // 60}m"
+        _status_emoji = "🚨" if r.status == "active" else "✅"
+        # Strip the kind prefix from the key for a cleaner first column.
+        _short_key = r.key.split(":", 1)[1] if ":" in r.key else r.key
+        _alert_rows.append({
+            "When": _age_str + " ago",
+            "Kind": r.kind,
+            "Subject": _short_key,
+            "Status": f"{_status_emoji} {r.status}",
+        })
+    st.dataframe(
+        pd.DataFrame(_alert_rows),
+        hide_index=True, use_container_width=True,
+        column_config={
+            "When": st.column_config.TextColumn(
+                "When",
+                help="Time since the alert fired.",
+            ),
+            "Kind": st.column_config.TextColumn(
+                "Kind",
+                help="Alert type (composite, score_delta, liq_cascade, "
+                     "funding_dev, oi_surge, whale, new_listing, token_unlock).",
+            ),
+            "Subject": st.column_config.TextColumn(
+                "Subject",
+                help="The pair / symbol the alert is about.",
+            ),
+            "Status": st.column_config.TextColumn(
+                "Status",
+                help="🚨 active = condition just hit; ✅ resolved = it cleared.",
+            ),
+        },
+    )
+    st.caption(
+        f"Showing {min(10, len(_recent_alerts))} most recent. "
+        f"See Page 11 for the full audit log + mute controls."
+    )
+    st.divider()
+
 ## ---- top movers ---- (biggest 1-hour score changes across all tracked pairs)
 from funding_screener.score_history import top_movers as _top_movers  # noqa: E402
 

@@ -52,6 +52,29 @@ def score_delta(samples: list[tuple[datetime, int]], minutes_ago: int) -> Option
     return int(current - best[1])
 
 
+def score_volatility(
+    samples: list[tuple[datetime, int]], min_samples: int = 4,
+) -> Optional[float]:
+    """Return the std-dev of scores in the history window.
+
+    Useful as a "signal stability" indicator: a +50 score that's been jumping
+    between +20 and +80 (high vol) reads differently from one steady at +50
+    all day (low vol). High vol = unstable regime / noisy data; low vol =
+    persistent thesis.
+
+    Returns None when history has fewer than `min_samples` (default 4 = ~40
+    minutes at the 10-min snapshot cadence). Below that the std is unreliable.
+    """
+    if not samples or len(samples) < min_samples:
+        return None
+    import statistics
+    values = [float(s) for _ts, s in samples]
+    try:
+        return statistics.stdev(values)
+    except statistics.StatisticsError:
+        return None
+
+
 def top_movers(
     histories: dict[tuple[str, str], list[tuple[datetime, int]]],
     minutes_ago: int = 60,

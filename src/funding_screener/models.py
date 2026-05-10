@@ -145,6 +145,10 @@ class CombinedFundingRow(_Frozen):
     # Hour-over-hour score change (current minus closest sample to 1h ago).
     # None when fewer than 2 history samples or drift > 50% off target.
     composite_score_delta_1h: Optional[int] = None
+    # Standard deviation of the composite score over its (up to) 24h history.
+    # Low = persistent regime; high = unstable/noisy signal. None when fewer
+    # than 4 samples available (≈40min after process start).
+    composite_score_stddev_24h: Optional[float] = None
 
     # Funding-rate deviation: z-score of current rate vs ~30-period history.
     # |z| > 2.5 = extreme, |z| > 1.5 = meaningful, otherwise persistent regime.

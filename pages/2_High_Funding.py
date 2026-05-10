@@ -99,6 +99,20 @@ if sector_bases:
 
 cap = int(cfg["row_limit"])
 capped_rows = rows[:cap]
+# Score-stability sidebar filter — added Round 27.
+hide_unstable = st.sidebar.checkbox(
+    "Hide unstable signals (σ > 30)",
+    value=False,
+    help="Drop rows where the 24h composite-score std-dev exceeds 30 — "
+         "those are noisy regimes where the signal flips around. Off by "
+         "default so you see everything; on when you only want clean "
+         "persistent setups.",
+)
+if hide_unstable:
+    capped_rows = [
+        r for r in capped_rows
+        if r.composite_score_stddev_24h is None or r.composite_score_stddev_24h <= 30
+    ]
 
 # Liquidation skew per Binance symbol — pulled fresh each render. We compute
 # the label list here (in row order) and attach it to df after construction
@@ -137,6 +151,7 @@ df = to_df(
     column_order=[
         "composite_score",
         "composite_score_delta_1h",
+        "composite_score_stddev_24h",
         "composite_emoji",
         "composite_short",
         "signal_emoji",
@@ -173,14 +188,16 @@ df = to_df(
 )
 
 if not df.empty:
-    # Composite Score column + 1h delta.
+    # Composite Score column + 1h delta + 24h std-dev (signal stability).
     df["Score"] = df["composite_score"]
     df["Δ 1h"] = df["composite_score_delta_1h"]
+    df["σ 24h"] = df["composite_score_stddev_24h"]
     df["Score label"] = (
         df["composite_emoji"].fillna("") + " " + df["composite_short"].fillna("")
     )
     df = df.drop(columns=[
-        "composite_score", "composite_score_delta_1h", "composite_emoji", "composite_short",
+        "composite_score", "composite_score_delta_1h", "composite_score_stddev_24h",
+        "composite_emoji", "composite_short",
     ])
     # Combine emoji + short label into one cell for compact display.
     df["Signal"] = df["signal_emoji"].fillna("") + " " + df["signal_short"].fillna("")
@@ -191,8 +208,8 @@ if not df.empty:
     df = df.drop(columns=["funding_deviation_label", "funding_deviation_z"])
     # 24h liquidation bias for the Binance symbol (Round 16).
     df["Liq 24h"] = _liq_labels
-    # Move Score / Δ / Signal / Dev / Liq to the front.
-    front = ["Score", "Δ 1h", "Score label", "Signal", "Dev", "Dev z", "Liq 24h"]
+    # Move Score / Δ / σ / Signal / Dev / Liq to the front.
+    front = ["Score", "Δ 1h", "σ 24h", "Score label", "Signal", "Dev", "Dev z", "Liq 24h"]
     cols = front + [c for c in df.columns if c not in front]
     df = df[cols]
 
@@ -268,6 +285,20 @@ if not df.empty:
                 "kind of signal — momentum is shifting in real time. Big negative Δ on a "
                 "previously-strong row warns that the move is rolling over.\n\n"
                 "Empty when not enough history yet (fresh deploy or restart)."
+            ),
+        ),
+        "σ 24h": st.column_config.NumberColumn(
+            "σ 24h",
+            format="%.1f",
+            help=(
+                "Standard deviation of the composite score over the last 24h "
+                "(in-memory snapshots, every 10 min). **Low = persistent regime**; "
+                "**high = noisy / unstable signal**.\n\n"
+                "Rough rules of thumb:\n"
+                "  σ ≤ 10  → tight regime (high conviction)\n"
+                "  σ 10-30 → normal score evolution\n"
+                "  σ > 30  → noisy / signal flipping (treat with caution)\n\n"
+                "Empty when fewer than 4 samples (≈40 min after restart)."
             ),
         ),
         "Score label": st.column_config.TextColumn(

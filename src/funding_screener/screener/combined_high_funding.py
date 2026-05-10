@@ -13,7 +13,7 @@ from typing import Iterable, Optional
 from datetime import datetime
 
 from ..models import CombinedFundingRow, ContractInfo, EnrichmentData, FundingRow, Kline
-from ..score_history import score_delta as _score_delta
+from ..score_history import score_delta as _score_delta, score_volatility as _score_volatility
 from ..sectors import sector_for
 from ..signals import (
     classify_signal,
@@ -229,6 +229,9 @@ def screen_combined_high_funding(
                 composite_breakdown="\n".join(composite.breakdown),
                 composite_score_delta_1h=_score_delta(
                     score_histories.get((base, quote)) or [], minutes_ago=60
+                ),
+                composite_score_stddev_24h=_score_volatility(
+                    score_histories.get((base, quote)) or []
                 ),
                 realized_vol_30d_pct=vol_30d,
                 funding_per_vol=funding_per_vol,
