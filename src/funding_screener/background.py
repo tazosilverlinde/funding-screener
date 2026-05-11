@@ -46,6 +46,7 @@ from .notifications import (
     evaluate_error_pattern_alert,
     evaluate_loop_stall_alert,
     evaluate_memory_pressure_alert,
+    suppress_overlapping_alerts,
     evaluate_new_listing_alerts,
     evaluate_oi_surge_alerts,
     evaluate_score_delta_alerts,
@@ -857,6 +858,14 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                             "memory auto-trim fired at RSS=%.0f MB: dropped %d score samples, %d liq events",
                             rss_mb, dropped_scores, dropped_liqs,
                         )
+
+            # Overlap suppression (Round 63) — when fresh/composite/score_delta
+            # all fire for the same pair (common during regime changes), keep
+            # only the highest-priority one to reduce alert fatigue. Resolved
+            # events pass through always so per-kind state machines stay consistent.
+            if cfg.get("overlap_suppression", {}).get("enabled", True):
+                groups_cfg = cfg.get("overlap_suppression", {}).get("groups")
+                events = suppress_overlapping_alerts(events, overlap_groups=groups_cfg)
 
             # Apply state machine: fire only on off→on transitions, send "resolved"
             # only for previously-active keys. Each successful fire is recorded

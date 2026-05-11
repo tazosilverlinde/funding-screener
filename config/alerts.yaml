@@ -18,6 +18,19 @@ alerts:
   enabled: true
   cooldown_minutes: 240   # 4 hours per (alert_type, symbol) pair
 
+  # Overlap suppression (Round 63) — when multiple alert kinds fire for the
+  # SAME pair due to a single underlying regime change (e.g. score jumps
+  # +50 → triggers composite + score_delta + fresh_setup simultaneously),
+  # keep only the highest-priority kind. Resolved events pass through so
+  # per-kind state machines stay consistent.
+  # Each group is an ordered list (first = highest priority).
+  overlap_suppression:
+    enabled: true
+    groups:
+      - [fresh, composite, score_delta]
+    # Alerts outside any group (liq, funding, oi_surge, whale, sector, etc.)
+    # are independent — never suppressed.
+
   # Telegram global rate limit (Round 61) — caps outbound messages per
   # rolling 60s window across ALL alert kinds combined. Prevents the bot
   # account from being suspended during volatile periods when many alerts

@@ -595,6 +595,100 @@ def evaluate_score_delta_alerts(combined_rows, abs_threshold: int) -> list[tuple
     return out
 
 
+def suppress_overlapping_alerts(
+    events: list[tuple[str, str, str]],
+    overlap_groups: Optional[list[list[str]]] = None,
+) -> list[tuple[str, str, str]]:
+    """De-duplicate active alerts across overlapping kinds (Round 63).
+
+    When a pair (BTC/USDT, ETH/USDT, ...) experiences a regime change like
+    "score jumped from +20 to +75 in the last hour", THREE evaluators fire:
+
+      - composite (score crossed +70)
+      - score_delta (|Δ 1h| ≥ 25)
+      - fresh_setup (Fresh bull + score ≥ 70)
+
+    All three describe the SAME underlying event. Sending three Telegram
+    messages for one regime change is alert fatigue.
+
+    This helper takes the assembled events list and, within each `overlap_group`,
+    keeps only the highest-priority kind for each subject (base/quote pair or
+    symbol — extracted from the alert key). Order in `overlap_group` IS the
+    priority: earlier kinds win over later.
+
+    RESOLVED events are NEVER suppressed — each kind's state machine needs
+    to resolve independently, otherwise stuck-active flags persist across
+    regime changes.
+
+    Default groups:
+      - fresh_setup → composite → score_delta (regime-change kinds)
+    Alerts outside any group (liq_cascade, funding_rate, oi_surge, whale_flow,
+    sector_rotation, etc.) are independent — never suppressed.
+
+    Input/output shape: list of (key, status, message) tuples.
+    """
+    if not events:
+        return []
+    if overlap_groups is None:
+        overlap_groups = [["fresh", "composite", "score_delta"]]
+
+    # Build a kind → group lookup for fast membership tests.
+    kind_to_group: dict[str, int] = {}
+    for group_idx, kinds in enumerate(overlap_groups):
+        for kind in kinds:
+            kind_to_group[kind] = group_idx
+    # Within each group: kind → priority index (lower = higher priority).
+    kind_priority: dict[str, int] = {}
+    for kinds in overlap_groups:
+        for prio, kind in enumerate(kinds):
+            kind_priority[kind] = prio
+
+    def _kind(key: str) -> str:
+        return key.split(":", 1)[0] if ":" in key else key
+
+    def _subject(key: str) -> str:
+        """Extract the symbol/pair part of the key — what's AFTER the kind."""
+        if ":" not in key:
+            return key
+        # Some keys have direction suffix like 'funding_dev:BTC/USDT:over'.
+        # Subject is everything between first ':' and (if present) second ':'.
+        parts = key.split(":", 2)
+        return parts[1] if len(parts) >= 2 else key
+
+    # Pass 1: collect active events per (group, subject) and find the
+    # highest-priority kind for each.
+    best_by_subject: dict[tuple[int, str], str] = {}
+    for key, status, _msg in events:
+        if status != "active":
+            continue
+        kind = _kind(key)
+        if kind not in kind_to_group:
+            continue
+        group_idx = kind_to_group[kind]
+        subj = _subject(key)
+        slot = (group_idx, subj)
+        if slot not in best_by_subject or kind_priority[kind] < kind_priority[best_by_subject[slot]]:
+            best_by_subject[slot] = kind
+
+    # Pass 2: emit events. Suppress active events in an overlap group whose
+    # kind is NOT the best for their (group, subject). Pass everything else
+    # through unchanged.
+    out: list[tuple[str, str, str]] = []
+    for key, status, msg in events:
+        if status != "active":
+            out.append((key, status, msg))
+            continue
+        kind = _kind(key)
+        if kind not in kind_to_group:
+            out.append((key, status, msg))
+            continue
+        slot = (kind_to_group[kind], _subject(key))
+        if best_by_subject.get(slot) == kind:
+            out.append((key, status, msg))
+        # else: suppressed — same subject already covered by higher-priority kind
+    return out
+
+
 def _error_category(msg: str) -> str:
     """Extract a coarse category from an error message for grouping (Round 57).
 
