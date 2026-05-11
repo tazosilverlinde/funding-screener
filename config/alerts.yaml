@@ -85,14 +85,15 @@ alerts:
     budget_mb: 2048           # the hard cap; matches process_memory.PROCESS_MEMORY_BUDGET_MB
     pct_threshold: 75         # alert when RSS / budget * 100 >= this
 
-    # Auto-trim (Round 54) — when memory pressure crosses pct_threshold AND
-    # auto_trim.enabled is true, the alerts loop defensively shrinks the two
-    # biggest growable buffers (score history + liquidations) on the next
-    # tick. Opt-in because trimming is destructive: trimmed history is gone.
-    # Suggested when running close to the cap; leave disabled if you have
-    # headroom and prefer pristine history.
+    # Auto-trim (Round 54, default-on as of Round 60) — when memory pressure
+    # crosses pct_threshold, the alerts loop defensively shrinks the two
+    # biggest growable buffers (score history + liquidations). Default is
+    # now ENABLED because the user has a hard 2GB-per-process cap that the
+    # process WILL hit under busy-market load without trimming. Users who
+    # prefer pristine 24h history at the cost of memory pressure can flip
+    # to false.
     auto_trim:
-      enabled: false
+      enabled: true
       score_history_hours: 12      # default 24h; trim to this when fired
       liq_window_seconds: 43200    # 12 hours; default 24h elsewhere
 

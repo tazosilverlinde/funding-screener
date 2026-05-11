@@ -826,7 +826,7 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 # destructive: trimmed history can't be reconstructed.
                 auto_trim_cfg = mp.get("auto_trim") or {}
                 if (
-                    auto_trim_cfg.get("enabled", False)
+                    auto_trim_cfg.get("enabled", True)
                     and rss_mb is not None
                     and rss_mb / float(mp.get("budget_mb", PROCESS_MEMORY_BUDGET_MB)) * 100.0
                     >= float(mp.get("pct_threshold", 75.0))
