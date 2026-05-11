@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from .config import is_binance_enabled, is_mexc_enabled, settings
@@ -132,9 +133,20 @@ class DataStore:
         self.liquidations = LiquidationsBuffer()
         # Bounded in-memory audit log of every alert fire. Survives across
         # alert-loop iterations so users can see what fired in the last few
-        # hours without scrolling Telegram. Wiped on process restart — same
-        # tradeoff as score_history.
-        self.alert_log = AlertLog()
+        # hours without scrolling Telegram. Optionally persists to an
+        # append-only JSON-lines file (Round 62) so it survives restarts.
+        # ALERT_LOG_PATH env var controls the persistence target:
+        #   unset / empty → in-memory only (existing behavior, no disk I/O)
+        #   set to a path → file is read on startup + appended on each fire
+        import os as _os
+        _persist_raw = _os.getenv("ALERT_LOG_PATH", "").strip()
+        _persist_path = Path(_persist_raw) if _persist_raw else None
+        if _persist_path is not None:
+            try:
+                _persist_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                _persist_path = None  # parent dir uncreatable → fall back to in-memory
+        self.alert_log = AlertLog(persist_path=_persist_path)
         # Alert mutes: pattern → unix-seconds expiry. Two flavours:
         #   - "kind:foo"      → mutes EVERY alert whose kind == "foo"
         #   - "symbol:BTCUSDT" → mutes every alert mentioning that symbol

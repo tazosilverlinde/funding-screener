@@ -84,33 +84,104 @@ class AlertFireRecord:
 
 
 class AlertLog:
-    """Bounded in-memory audit log of alert fires.
+    """Bounded in-memory audit log of alert fires, with optional append-only
+    persistence to disk (Round 62).
 
     Producer: the alerts loop calls record() after a successful (or attempted)
-    send. Consumer: the new audit-log page reads recent() to render history.
+    send. Consumer: the Alerts Log page reads recent() to render history.
     Bounded at `max_entries` (default 500) — far more than a user reads, but
     cheap memory-wise and gives a meaningful 24-72h tail of activity.
+
+    Persistence (Round 62, opt-in):
+      When persist_path is set, every record() also appends one JSON line to
+      the file. On construction, the file is read and the last `max_entries`
+      lines are replayed into the in-memory buffer so the audit log survives
+      restarts. Append-only by design — never rotates, never deletes; users
+      who want to trim can rotate the file externally (logrotate, etc.).
+      Designed for ephemeral-disk environments: missing file is fine,
+      corrupted lines are skipped, write errors don't crash recording.
     """
 
-    def __init__(self, max_entries: int = 500) -> None:
+    def __init__(
+        self, max_entries: int = 500, persist_path: Optional[Path] = None,
+    ) -> None:
         self._max = max_entries
         self._buf: list[AlertFireRecord] = []
+        self._persist_path = persist_path
+        if persist_path is not None:
+            self._replay_from_disk()
+
+    def _replay_from_disk(self) -> None:
+        """Load the tail of the on-disk log into the in-memory buffer.
+
+        Idempotent: safe to call multiple times. Missing file is fine.
+        Corrupted JSON lines are skipped with a debug log; we don't bail
+        because one bad line shouldn't lose the rest.
+        """
+        import json
+        if self._persist_path is None or not self._persist_path.exists():
+            return
+        try:
+            lines = self._persist_path.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            _log.warning("AlertLog: failed to read %s: %s", self._persist_path, exc)
+            return
+        # Walk only the tail (cap-sized) to avoid loading a huge file into
+        # memory just to discard most of it.
+        for line in lines[-self._max:]:
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+                self._buf.append(AlertFireRecord(
+                    fired_at=float(d["fired_at"]),
+                    key=str(d["key"]),
+                    kind=str(d["kind"]),
+                    status=str(d["status"]),
+                    message=str(d["message"]),
+                    delivered_to=tuple(d.get("delivered_to") or ()),
+                ))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                _log.debug("AlertLog: skipping malformed line: %s", exc)
+
+    def _append_to_disk(self, rec: AlertFireRecord) -> None:
+        """Write one record as a JSON line. Best-effort — write errors are
+        logged but don't propagate (alert recording must never fail).
+        """
+        import json
+        if self._persist_path is None:
+            return
+        try:
+            line = json.dumps({
+                "fired_at": rec.fired_at,
+                "key": rec.key,
+                "kind": rec.kind,
+                "status": rec.status,
+                "message": rec.message,
+                "delivered_to": list(rec.delivered_to),
+            }, ensure_ascii=False)
+            with self._persist_path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception as exc:
+            _log.warning("AlertLog: failed to append to %s: %s", self._persist_path, exc)
 
     def record(
         self, key: str, status: str, message: str, delivered_to: tuple[str, ...] = (),
     ) -> None:
         kind = key.split(":", 1)[0] if ":" in key else key
-        self._buf.append(AlertFireRecord(
+        rec = AlertFireRecord(
             fired_at=time.time(),
             key=key,
             kind=kind,
             status=status,
             message=message,
             delivered_to=delivered_to,
-        ))
+        )
+        self._buf.append(rec)
         # Trim oldest when over cap. List append + slice is O(N) but N≤500 so it's fine.
         if len(self._buf) > self._max:
             self._buf = self._buf[-self._max:]
+        self._append_to_disk(rec)
 
     def recent(self, limit: int = 50, kind: Optional[str] = None) -> list[AlertFireRecord]:
         """Return the most recent entries (newest first). Optionally filter by kind."""
