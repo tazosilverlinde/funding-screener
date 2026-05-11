@@ -571,6 +571,48 @@ def compute_funding_deviation(
     )
 
 
+SCORE_HISTOGRAM_BUCKETS: list[tuple[str, int, int]] = [
+    ("💥 Strong bear", -100, -70),
+    ("🔴 Bearish", -70, -30),
+    ("↘ Mild bear", -30, -10),
+    ("🟡 Neutral", -10, 10),
+    ("↗ Mild bull", 10, 30),
+    ("🟢 Bullish", 30, 70),
+    ("🚀 Strong bull", 70, 100),
+]
+
+
+def bucket_scores_for_histogram(
+    scores: list[int],
+    buckets: Optional[list[tuple[str, int, int]]] = None,
+) -> list[tuple[str, int]]:
+    """Pure bucketing for the landing-page score histogram (Round 59).
+
+    Buckets are [lo, hi) half-open intervals, except the LAST bucket which is
+    [lo, hi] inclusive on both ends so the maximum value (+100) lands in
+    'Strong bull' instead of falling off the chart.
+
+    Defaults to SCORE_HISTOGRAM_BUCKETS — the 7-bucket layout matching the
+    composite-score label thresholds. Returns list of (label, count) pairs
+    in bucket order (left-to-right on the chart).
+
+    None/empty input → all-zero counts. Out-of-range scores (which shouldn't
+    occur from compute_composite_score but might from corrupted data) are
+    silently dropped rather than skewing one bucket.
+    """
+    buckets = buckets or SCORE_HISTOGRAM_BUCKETS
+    counts = [0] * len(buckets)
+    for s in (scores or []):
+        if s is None:
+            continue
+        for i, (_label, lo, hi) in enumerate(buckets):
+            in_range = (lo <= s < hi) or (i == len(buckets) - 1 and s == hi)
+            if in_range:
+                counts[i] += 1
+                break
+    return [(buckets[i][0], counts[i]) for i in range(len(buckets))]
+
+
 def _composite_label(score: int) -> tuple[str, str, str]:
     """Map score → (emoji, short label, color). Symmetric around zero."""
     if score >= 70:

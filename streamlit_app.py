@@ -123,6 +123,35 @@ def _render_market_sentiment_hero(rows: list) -> None:
 _render_market_sentiment_hero(_combined_rows)
 
 
+# ---- Score distribution histogram (Round 59) ---------------------------------
+# Visualizes how composite scores are spread across all tracked pairs. The
+# sentiment hero above summarizes with counts; the histogram shows SHAPE —
+# tight cluster around 0 (consensus neutral), bimodal (regime split), or
+# heavy in one tail (broad directional move). Hidden when no scored rows yet.
+
+def _render_score_histogram(rows: list) -> None:
+    import pandas as pd  # noqa: E402
+    from funding_screener.signals import bucket_scores_for_histogram  # noqa: E402
+    scored_scores = [
+        r.composite_score for r in rows if r.composite_score is not None
+    ]
+    if len(scored_scores) < 5:
+        return  # not enough data for a useful histogram
+    buckets = bucket_scores_for_histogram(scored_scores)
+    df_hist = pd.DataFrame(
+        [{"Bucket": label, "Pairs": count} for label, count in buckets]
+    ).set_index("Bucket")
+    st.caption(
+        "**Score distribution** — how many pairs land in each composite-score "
+        "bucket. Tight cluster around Neutral = consensus undecided market; "
+        "fat tails = directional move with broad participation."
+    )
+    st.bar_chart(df_hist, height=180)
+
+
+_render_score_histogram(_combined_rows)
+
+
 # ---- Best opportunities widget (Round 35) -----------------------------------
 # Picks the top 3 actionable setups (Fresh / Building only — Mature, Late, and
 # Noisy excluded) by absolute composite score. Renders as side-by-side cards
