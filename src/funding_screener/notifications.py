@@ -131,19 +131,63 @@ class AlertLog:
 
 
 class TelegramClient:
-    """Minimal Telegram Bot API client. Idempotent setup; safe to construct
-    even when env vars aren't set (calls become no-ops)."""
+    """Minimal Telegram Bot API client with a sliding-window rate limiter
+    (Round 61). Idempotent setup; safe to construct even when env vars
+    aren't set (calls become no-ops).
+
+    Rate limiter: Telegram's bot API allows ~30 msg/sec to a single chat
+    before triggering 429 / temporary suspension on the bot account. With
+    14 alert kinds × ~200 pairs × cooldown windows, a volatile market can
+    plausibly burst 100+ messages in a minute. The default cap of 20/min
+    keeps us well under the suspension threshold; overflow messages are
+    DROPPED (logged as warnings) rather than queued — queueing creates
+    backpressure that makes alerts go stale.
+    """
 
     name = "Telegram"
+    DEFAULT_MAX_PER_MINUTE: int = 20
 
-    def __init__(self, http: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient | None = None,
+        max_per_minute: int | None = None,
+    ) -> None:
         self._token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self._chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self._http = http or httpx.AsyncClient(timeout=15.0)
         self._owns_http = http is None
+        self._max_per_minute = (
+            max_per_minute if max_per_minute is not None else self.DEFAULT_MAX_PER_MINUTE
+        )
+        # Sliding-window timestamps of recent sends. Pruned on every check.
+        self._send_history: list[float] = []
+        self._dropped_count: int = 0
 
     def is_configured(self) -> bool:
         return bool(self._token and self._chat_id)
+
+    def configure_rate_limit(self, max_per_minute: int) -> None:
+        """Allow alerts.yaml override at runtime — called from the alerts loop
+        once per cycle so changes apply without restart.
+        """
+        self._max_per_minute = max(1, int(max_per_minute))
+
+    def dropped_count(self) -> int:
+        """Total messages dropped due to rate limiting since process start.
+        Surfaced on the System Health page so operators see suppression."""
+        return self._dropped_count
+
+    def _check_rate_limit(self) -> bool:
+        """Returns True if we're allowed to send right now. Side effect:
+        prunes timestamps older than 60s from history.
+        """
+        now = time.monotonic()
+        # Drop entries older than 60s (sliding window).
+        self._send_history = [t for t in self._send_history if (now - t) < 60.0]
+        if len(self._send_history) >= self._max_per_minute:
+            return False
+        self._send_history.append(now)
+        return True
 
     async def aclose(self) -> None:
         if self._owns_http:
@@ -151,9 +195,23 @@ class TelegramClient:
 
     async def send(self, text: str) -> bool:
         """Returns True iff the message was actually delivered (or quietly skipped
-        when not configured). Returns False on transport failure."""
+        when not configured / rate-limited). Returns False on transport failure.
+
+        Rate-limited messages are silently dropped (with a log line). Returning
+        True for "rate-limited" matches the existing "skipped because
+        unconfigured" semantics — both mean "didn't reach Telegram but no
+        operational error".
+        """
         if not self.is_configured():
             return True  # silently skipped — not a failure
+        if not self._check_rate_limit():
+            self._dropped_count += 1
+            _log.warning(
+                "Telegram rate limit hit (%d/min); dropping message. "
+                "Lifetime dropped: %d",
+                self._max_per_minute, self._dropped_count,
+            )
+            return True
         url = f"{_TELEGRAM_BASE}/bot{self._token}/sendMessage"
         try:
             r = await self._http.post(

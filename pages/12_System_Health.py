@@ -186,6 +186,30 @@ else:
 st.divider()
 
 
+# ---------------- Telegram rate-limit drops (Round 61) ----------------
+
+# Surface the cumulative dropped count from the rate limiter. When > 0 it
+# means the alerts loop tried to send more than the configured per-minute
+# cap; users should consider tuning thresholds, watchlist, or cooldown.
+from funding_screener.background import _runner_state  # noqa: E402
+_telegram_client = _runner_state.get("telegram")
+if _telegram_client is not None:
+    _dropped = _telegram_client.dropped_count()
+    if _dropped > 0:
+        st.warning(
+            f"⚠️ **Telegram rate-limit drops:** {_dropped} message(s) dropped "
+            "since process start due to the per-minute cap. Consider tuning "
+            "alert thresholds, enabling the watchlist filter, or raising "
+            "`alerts.telegram_rate_limit_per_minute` in `config/alerts.yaml`."
+        )
+    else:
+        st.caption(
+            "Telegram rate limiter: 0 messages dropped since process start ✅"
+        )
+
+st.divider()
+
+
 # ---------------- Recent errors ----------------
 
 st.subheader("4. Recent errors")

@@ -638,6 +638,11 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                 await asyncio.sleep(interval)
                 continue
             cooldown_s = float(cfg.get("cooldown_minutes", 240)) * 60.0
+            # Apply rate-limit override from YAML each cycle (Round 61) so a
+            # config change takes effect without restart.
+            telegram.configure_rate_limit(
+                int(cfg.get("telegram_rate_limit_per_minute", 20))
+            )
 
             bnb = store.read_binance()
             mxc = store.read_mexc()
@@ -1526,6 +1531,7 @@ def _runner() -> None:
     email = EmailClient()
     _runner_state["binance"] = binance
     _runner_state["mexc"] = mexc
+    _runner_state["telegram"] = telegram  # Round 61: needed by System Health page
     try:
         _store.bg_started_at = datetime.now(timezone.utc)
         loop.create_task(_fast_loop(_store, binance, mexc))

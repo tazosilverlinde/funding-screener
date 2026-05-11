@@ -18,6 +18,15 @@ alerts:
   enabled: true
   cooldown_minutes: 240   # 4 hours per (alert_type, symbol) pair
 
+  # Telegram global rate limit (Round 61) — caps outbound messages per
+  # rolling 60s window across ALL alert kinds combined. Prevents the bot
+  # account from being suspended during volatile periods when many alerts
+  # fire simultaneously. Overflow is DROPPED (with a log warning + counter
+  # on Page 12) rather than queued, because queueing makes alerts stale.
+  # Telegram's hard limit to a single chat is ~30 msg/sec; default 20/min
+  # is well under that with headroom for batched-digest sends.
+  telegram_rate_limit_per_minute: 20
+
   # Watchlist filter (Round 48). When non-empty, per-symbol alerts (composite,
   # score-delta, fresh-setup, funding-deviation, OI-surge) only fire for rows
   # whose base asset is in this list. Sector-rotation and aggregate-flow
