@@ -229,6 +229,60 @@ m4.metric(
     help="Composite signal score (-100..+100). Positive = long bias. See breakdown below.",
 )
 
+
+# ---------------- 0. LIVE TRADINGVIEW CHART (Round 70) ----------------
+# TradingView's free public Advanced Chart widget — no API key required.
+# Symbol mapping:
+#   Binance perp (BTCUSDT) → BINANCE:BTCUSDT (spot equivalent, identical
+#                            price action for trading-decision purposes)
+#   MEXC perp (BTC_USDT)   → MEXC:BTCUSDT  (TV uses no underscore)
+# Collapsed by default — iframe load adds ~500KB and one cross-origin
+# request the user shouldn't pay for unless they want the chart.
+import streamlit.components.v1 as _components  # noqa: E402
+
+if exchange == "Binance":
+    _tv_symbol = f"BINANCE:{symbol_q}"
+elif exchange == "MEXC":
+    _tv_symbol = f"MEXC:{symbol_q.replace('_', '')}"
+else:
+    _tv_symbol = None
+
+if _tv_symbol:
+    with st.expander(
+        f"📈 TradingView chart — `{_tv_symbol}` "
+        "(candles, indicators, drawing tools)", expanded=False,
+    ):
+        st.caption(
+            "Embedded from `s3.tradingview.com` (free, no account needed). "
+            "Adds ~500KB and one cross-origin request when opened — close "
+            "the expander to stop the iframe."
+        )
+        _components.html(
+            f"""
+            <div class="tradingview-widget-container">
+              <div id="tv_chart_widget"></div>
+              <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+              <script type="text/javascript">
+                new TradingView.widget({{
+                  "container_id": "tv_chart_widget",
+                  "symbol": "{_tv_symbol}",
+                  "interval": "60",
+                  "timezone": "Etc/UTC",
+                  "theme": "dark",
+                  "style": "1",
+                  "locale": "en",
+                  "enable_publishing": false,
+                  "allow_symbol_change": true,
+                  "hide_side_toolbar": false,
+                  "width": "100%",
+                  "height": 500
+                }});
+              </script>
+            </div>
+            """,
+            height=540,
+        )
+
 # Banner with full breakdown
 banner_text = f"**{sig.emoji} {sig.short}**\n\n{sig.breakdown}"
 if sig.color == "green":
