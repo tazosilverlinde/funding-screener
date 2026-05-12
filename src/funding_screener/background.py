@@ -164,6 +164,24 @@ class DataStore:
             except Exception:
                 _persist_path = None  # parent dir uncreatable → fall back to in-memory
         self.alert_log = AlertLog(persist_path=_persist_path)
+        # Watchlist live overrides (Round 68). Two sets that combine with the
+        # YAML watchlist (alerts.watchlist) to form the effective filter:
+        #   effective = (yaml | additions) - removals
+        # Empty everything → no filter, all pairs pass (same as before R48).
+        # Persists to WATCHLIST_OVERRIDES_PATH JSON file when set (similar
+        # pattern to R66 mute persistence). Lets users curate from the UI
+        # without restart + without editing YAML.
+        self.watchlist_additions: set[str] = set()
+        self.watchlist_removals: set[str] = set()
+        _wl_raw = os.getenv("WATCHLIST_OVERRIDES_PATH", "").strip()
+        self._watchlist_persist_path = Path(_wl_raw) if _wl_raw else None
+        if self._watchlist_persist_path is not None:
+            try:
+                self._watchlist_persist_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                self._watchlist_persist_path = None
+        self._load_watchlist_overrides_from_disk()
+
         # Alert mutes: pattern → unix-seconds expiry. Two flavours:
         #   - "kind:foo"      → mutes EVERY alert whose kind == "foo"
         #   - "symbol:BTCUSDT" → mutes every alert mentioning that symbol
@@ -532,6 +550,106 @@ class DataStore:
             self.alert_mutes.pop(pattern, None)
         self._save_mutes_to_disk()
 
+    def watchlist_include(self, base: str) -> None:
+        """Add `base` (uppercase ticker) to the live watchlist (Round 68).
+
+        Idempotent. If `base` was on the removals list, removes it from
+        there — net effect is "definitely include this asset".
+        """
+        b = (base or "").strip().upper()
+        if not b:
+            return
+        with self._lock:
+            self.watchlist_additions.add(b)
+            self.watchlist_removals.discard(b)
+        self._save_watchlist_overrides_to_disk()
+
+    def watchlist_exclude(self, base: str) -> None:
+        """Add `base` to the live exclusions (Round 68). Removes from
+        additions if present. Useful for temporarily silencing one of the
+        YAML-watchlisted symbols without editing the file.
+        """
+        b = (base or "").strip().upper()
+        if not b:
+            return
+        with self._lock:
+            self.watchlist_removals.add(b)
+            self.watchlist_additions.discard(b)
+        self._save_watchlist_overrides_to_disk()
+
+    def watchlist_clear_override(self, base: str) -> None:
+        """Clear ANY live override for `base` — base falls back to YAML behavior."""
+        b = (base or "").strip().upper()
+        if not b:
+            return
+        with self._lock:
+            self.watchlist_additions.discard(b)
+            self.watchlist_removals.discard(b)
+        self._save_watchlist_overrides_to_disk()
+
+    def read_effective_watchlist(self, yaml_set: set[str]) -> set[str]:
+        """Combine YAML + live overrides into the effective filter set.
+
+        effective = (yaml | additions) - removals
+
+        Empty result means "no filter, all pairs eligible" (matches the
+        existing parse_watchlist convention).
+        """
+        with self._lock:
+            adds = set(self.watchlist_additions)
+            rems = set(self.watchlist_removals)
+        return ({s.upper() for s in (yaml_set or set())} | adds) - rems
+
+    def read_watchlist_overrides(self) -> tuple[set[str], set[str]]:
+        """Snapshot the live overrides — (additions, removals)."""
+        with self._lock:
+            return set(self.watchlist_additions), set(self.watchlist_removals)
+
+    def _load_watchlist_overrides_from_disk(self) -> None:
+        """Restore watchlist overrides from disk on startup (Round 68)."""
+        import json as _json
+        path = self._watchlist_persist_path
+        if path is None or not path.exists():
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+            data = _json.loads(raw) if raw.strip() else {}
+        except Exception as exc:
+            log.warning("watchlist_overrides: failed to load %s: %s", path, exc)
+            return
+        if not isinstance(data, dict):
+            return
+        with self._lock:
+            for item in (data.get("additions") or []):
+                if isinstance(item, str) and item.strip():
+                    self.watchlist_additions.add(item.strip().upper())
+            for item in (data.get("removals") or []):
+                if isinstance(item, str) and item.strip():
+                    self.watchlist_removals.add(item.strip().upper())
+
+    def _save_watchlist_overrides_to_disk(self) -> None:
+        """Best-effort atomic write of watchlist overrides (Round 68)."""
+        import json as _json
+        path = self._watchlist_persist_path
+        if path is None:
+            return
+        with self._lock:
+            payload = {
+                "additions": sorted(self.watchlist_additions),
+                "removals": sorted(self.watchlist_removals),
+            }
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text(_json.dumps(payload, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as exc:
+            log.warning("watchlist_overrides: failed to write %s: %s", path, exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def _load_mutes_from_disk(self) -> None:
         """Read persisted mutes on startup, dropping any that have expired.
 
@@ -855,12 +973,12 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                     liq_stats_by_symbol=liq_stats_for_alerts,
                 )
 
-                # Watchlist filter (Round 48). When the YAML watchlist is
-                # non-empty, per-symbol evaluators only see those rows.
-                # Sector-rotation still uses unfiltered rows so a sector flip
-                # across the FULL universe still fires regardless of which
-                # specific bases are watchlisted.
-                _watchlist_set = parse_watchlist(cfg.get("watchlist"))
+                # Watchlist filter (Round 48 + R68 live overrides). YAML
+                # watchlist is combined with in-memory additions/removals
+                # via read_effective_watchlist so UI edits take effect on
+                # the next alerts-loop cycle without restart.
+                _yaml_watchlist = parse_watchlist(cfg.get("watchlist"))
+                _watchlist_set = store.read_effective_watchlist(_yaml_watchlist)
                 watchlisted_rows = filter_rows_by_watchlist(combined_rows, _watchlist_set)
 
                 if cfg.get("composite_score", {}).get("enabled", True):
@@ -1635,7 +1753,9 @@ async def _daily_digest_loop(
             # top picks come from the same curated list. Empty/missing →
             # full universe, like before.
             _alerts_cfg_for_digest = (load_alerts_config() or {}).get("alerts") or {}
-            digest_watchlist = parse_watchlist(_alerts_cfg_for_digest.get("watchlist"))
+            digest_watchlist = store.read_effective_watchlist(
+                parse_watchlist(_alerts_cfg_for_digest.get("watchlist"))
+            )
 
             # System status footer (Round 58) — built from the same data the
             # System Health page uses so the digest health-snapshot stays

@@ -85,6 +85,57 @@ with st.expander("🔕 Mute alerts", expanded=False):
         st.rerun()
 
 
+# ---- Watchlist live overrides (Round 68) ----
+with st.expander("📋 Watchlist overrides", expanded=False):
+    st.caption(
+        "Add or remove bases from the alert watchlist WITHOUT editing "
+        "`config/alerts.yaml`. Live overrides combine with the YAML list:\n\n"
+        "`effective = (yaml | additions) - removals`\n\n"
+        "Empty everything → no filter (all pairs eligible). Overrides persist "
+        "across restarts when `WATCHLIST_OVERRIDES_PATH` is set; otherwise "
+        "they're in-memory only."
+    )
+    adds, rems = store.read_watchlist_overrides()
+    if adds:
+        st.markdown("**Live additions** (included beyond YAML):")
+        for base in sorted(adds):
+            wc1, wc2 = st.columns([4, 1])
+            wc1.write(f"`{base}` — live-included")
+            if wc2.button("Clear", key=f"wl_clr_add_{base}"):
+                store.watchlist_clear_override(base)
+                st.rerun()
+    if rems:
+        st.markdown("**Live exclusions** (silenced even if in YAML):")
+        for base in sorted(rems):
+            wc1, wc2 = st.columns([4, 1])
+            wc1.write(f"`{base}` — live-excluded")
+            if wc2.button("Clear", key=f"wl_clr_rem_{base}"):
+                store.watchlist_clear_override(base)
+                st.rerun()
+
+    st.markdown("**Add an override:**")
+    wl_c1, wl_c2, wl_c3 = st.columns([1, 2, 1])
+    op_kind = wl_c1.selectbox(
+        "Action",
+        ["Include", "Exclude"],
+        help="Include = add to effective watchlist (alerts will fire). "
+             "Exclude = remove from effective watchlist (silences even YAML entries).",
+    )
+    base_value = wl_c2.text_input(
+        "Base ticker",
+        placeholder="e.g. BTC, ETH, WIF",
+        help="Uppercase ticker. Case is normalized.",
+    )
+    if wl_c3.button(op_kind, disabled=not base_value):
+        if op_kind == "Include":
+            store.watchlist_include(base_value)
+            st.success(f"`{base_value.upper()}` added to live watchlist")
+        else:
+            store.watchlist_exclude(base_value)
+            st.success(f"`{base_value.upper()}` excluded from watchlist")
+        st.rerun()
+
+
 if total_logged == 0:
     st.info(
         "No alerts have fired since process start. Either the market is "
