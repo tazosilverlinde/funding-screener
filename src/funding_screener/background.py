@@ -155,8 +155,19 @@ class DataStore:
         # Alert mutes: pattern → unix-seconds expiry. Two flavours:
         #   - "kind:foo"      → mutes EVERY alert whose kind == "foo"
         #   - "symbol:BTCUSDT" → mutes every alert mentioning that symbol
-        # Wipes on restart by design — short-lived suppressions only.
+        # Persists to disk when ALERT_MUTES_PATH env var is set (Round 66) so
+        # users don't have to re-set mutes after every redeploy. Mutes load
+        # on startup and rewrite on every add/remove. Expired entries pruned
+        # both in memory (read-time) and on disk (write-time).
         self.alert_mutes: dict[str, float] = {}
+        _mutes_raw = _os.getenv("ALERT_MUTES_PATH", "").strip()
+        self._mutes_persist_path = Path(_mutes_raw) if _mutes_raw else None
+        if self._mutes_persist_path is not None:
+            try:
+                self._mutes_persist_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                self._mutes_persist_path = None  # uncreatable → fall back to in-memory
+        self._load_mutes_from_disk()
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -408,10 +419,62 @@ class DataStore:
         """
         with self._lock:
             self.alert_mutes[pattern] = time.time() + (hours * 3600)
+        self._save_mutes_to_disk()
 
     def unmute_alert(self, pattern: str) -> None:
         with self._lock:
             self.alert_mutes.pop(pattern, None)
+        self._save_mutes_to_disk()
+
+    def _load_mutes_from_disk(self) -> None:
+        """Read persisted mutes on startup, dropping any that have expired.
+
+        Idempotent and defensive: missing file is fine; corrupted JSON is
+        logged + skipped; never raises. Round 66.
+        """
+        import json as _json
+        if self._mutes_persist_path is None or not self._mutes_persist_path.exists():
+            return
+        try:
+            raw = self._mutes_persist_path.read_text(encoding="utf-8")
+            data = _json.loads(raw) if raw.strip() else {}
+        except Exception as exc:
+            log.warning("alert_mutes: failed to load %s: %s",
+                        self._mutes_persist_path, exc)
+            return
+        now = time.time()
+        with self._lock:
+            for pattern, expiry in data.items():
+                try:
+                    expiry_ts = float(expiry)
+                except (TypeError, ValueError):
+                    continue
+                if expiry_ts > now and isinstance(pattern, str):
+                    self.alert_mutes[pattern] = expiry_ts
+
+    def _save_mutes_to_disk(self) -> None:
+        """Best-effort persist of current mutes. Write errors are logged but
+        never propagate — mute_alert and unmute_alert must not crash on a
+        broken disk.
+
+        Writes a single JSON object {pattern: expiry_unix_seconds}. Expired
+        entries are filtered out before writing so the file doesn't accumulate
+        dead patterns.
+        """
+        import json as _json
+        if self._mutes_persist_path is None:
+            return
+        now = time.time()
+        with self._lock:
+            payload = {p: exp for p, exp in self.alert_mutes.items() if exp > now}
+        try:
+            self._mutes_persist_path.write_text(
+                _json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            log.warning("alert_mutes: failed to write %s: %s",
+                        self._mutes_persist_path, exc)
 
     def is_alert_muted(self, kind: str, key: str) -> bool:
         """Returns True if an alert of this kind/key matches an active mute."""
