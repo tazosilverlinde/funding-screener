@@ -153,3 +153,126 @@ def compute_signal_hit_rate(
         ),
         "n_followup_missing": n_missing,
     }
+
+
+def compute_per_pair_hit_rate(
+    samples_by_pair: dict,
+    threshold: int = 70,
+    follow_up_hours: float = 1.0,
+    sustain_threshold: Optional[int] = None,
+    tolerance_minutes: float = 15.0,
+    min_crosses: int = 1,
+) -> list[dict]:
+    """Per-pair breakdown of crossings + sustain rate (Round 72).
+
+    Same math as compute_signal_hit_rate but PER pair rather than aggregated.
+    Useful for answering "which pairs is the score actually predictive on,
+    and which are pure noise?" Pairs with fewer than `min_crosses` are
+    dropped — small samples produce wildly variable rates.
+
+    Each output dict:
+      key                      — the pair key from input (tuple or string)
+      label                    — "BASE/QUOTE" string for display
+      n_crosses
+      n_sustained
+      sustain_rate             — 0.0..1.0 or None when n_crosses < min_crosses
+      avg_score_at_cross
+      avg_score_after
+      avg_score_delta
+
+    Sorted by sustain_rate descending (best-sustaining pairs first), with
+    pairs tied on rate broken by n_crosses descending (more samples = more
+    confidence). Pairs below min_crosses are NOT in the output.
+    """
+    sustain = sustain_threshold if sustain_threshold is not None else threshold
+    tol = timedelta(minutes=max(0.0, tolerance_minutes))
+    fwd = timedelta(hours=max(0.0, follow_up_hours))
+    upward = threshold >= 0
+
+    out: list[dict] = []
+    for key, samples in (samples_by_pair or {}).items():
+        if not samples or len(samples) < 2:
+            continue
+        crossings = find_threshold_crossings(samples, threshold)
+        if len(crossings) < min_crosses:
+            continue
+        n_crosses = 0
+        n_sustained = 0
+        sum_at = 0
+        sum_after = 0
+        n_with_followup = 0
+        for idx in crossings:
+            cross_ts, cross_score = samples[idx]
+            n_crosses += 1
+            sum_at += cross_score
+            target = cross_ts + fwd
+            found = _find_sample_near(samples, target, tol)
+            if found is None:
+                continue
+            _, score2 = found
+            sum_after += score2
+            n_with_followup += 1
+            if (upward and score2 >= sustain) or (not upward and score2 <= sustain):
+                n_sustained += 1
+        if n_crosses == 0:
+            continue
+        # Build display label — if key is a (base, quote) tuple, format
+        # nicely; otherwise just stringify.
+        if isinstance(key, tuple) and len(key) == 2:
+            label = f"{key[0]}/{key[1]}"
+        else:
+            label = str(key)
+        out.append({
+            "key": key,
+            "label": label,
+            "n_crosses": n_crosses,
+            "n_sustained": n_sustained,
+            "sustain_rate": (n_sustained / n_crosses),
+            "avg_score_at_cross": sum_at / n_crosses,
+            "avg_score_after": (sum_after / n_with_followup) if n_with_followup else None,
+            "avg_score_delta": (
+                (sum_after / n_with_followup) - (sum_at / n_crosses)
+                if n_with_followup else None
+            ),
+        })
+    # Sort: highest sustain rate first; tie-broken by n_crosses (more
+    # confident bigger samples come first within same rate).
+    out.sort(key=lambda r: (-(r["sustain_rate"] or 0), -r["n_crosses"]))
+    return out
+
+
+def compute_decay_curve(
+    samples_by_pair: dict,
+    threshold: int = 70,
+    follow_up_windows_hours: Optional[list[float]] = None,
+    sustain_threshold: Optional[int] = None,
+    tolerance_minutes: float = 15.0,
+) -> list[dict]:
+    """Signal-decay curve: sustain rate across multiple follow-up windows.
+
+    Crossing the threshold at +75 then dropping to neutral over 6h tells a
+    different story than dropping to neutral over 30 minutes. By evaluating
+    sustain rate at several follow-ups (e.g. [0.5, 1, 2, 4, 12] hours), we
+    plot a decay curve and see WHERE signal value bleeds off.
+
+    Returns list of dicts (one per window) in the order of
+    `follow_up_windows_hours`, each with:
+      follow_up_hours
+      n_crosses          (crossings with a sample available at this window)
+      sustain_rate       (or None when no crossings had a follow-up sample)
+
+    Default windows: [0.5, 1, 2, 4, 12] hours.
+    """
+    if follow_up_windows_hours is None:
+        follow_up_windows_hours = [0.5, 1.0, 2.0, 4.0, 12.0]
+    return [
+        {
+            "follow_up_hours": h,
+            **{k: v for k, v in compute_signal_hit_rate(
+                samples_by_pair, threshold=threshold,
+                follow_up_hours=h, sustain_threshold=sustain_threshold,
+                tolerance_minutes=tolerance_minutes,
+            ).items() if k in ("n_crosses", "sustain_rate")},
+        }
+        for h in follow_up_windows_hours
+    ]

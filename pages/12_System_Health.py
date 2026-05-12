@@ -282,7 +282,11 @@ st.caption(
     "Aggregated across all tracked pairs. Useful for gauging the SIGNAL'S "
     "own predictive value — meta-quality."
 )
-from funding_screener.analytics import compute_signal_hit_rate  # noqa: E402
+from funding_screener.analytics import (  # noqa: E402
+    compute_decay_curve,
+    compute_per_pair_hit_rate,
+    compute_signal_hit_rate,
+)
 
 _score_histories_for_analytics = store.read_score_histories()
 if not _score_histories_for_analytics:
@@ -338,6 +342,66 @@ else:
                     f"avg 1h later: `{bear_stats['avg_score_after']:+.1f}` "
                     f"(Δ {bear_stats['avg_score_delta']:+.1f})"
                 )
+
+    # ── Per-pair hit-rate (Round 72) ──────────────────────────────────────
+    # Which pairs is the +70 cross actually predictive on? Useful for
+    # tuning per-pair thresholds in alerts.yaml (R69).
+    per_pair = compute_per_pair_hit_rate(
+        _score_histories_for_analytics,
+        threshold=70, follow_up_hours=1.0, min_crosses=1,
+    )
+    if per_pair:
+        st.markdown("**Per-pair sustain rate** (+70 crossings, 1h follow-up)")
+        st.caption(
+            "Best-sustaining pairs first. Pairs with few crossings (<3) have "
+            "noisy rates — use them as leading indicators, not stats. Compare "
+            "to your `per_pair` overrides in `alerts.yaml`."
+        )
+        pp_rows = [
+            {
+                "Pair": r["label"],
+                "Crosses": r["n_crosses"],
+                "Sustained": r["n_sustained"],
+                "Rate": f"{r['sustain_rate'] * 100:.0f}%",
+                "Avg @ cross": (
+                    f"{r['avg_score_at_cross']:+.1f}"
+                    if r["avg_score_at_cross"] is not None else "—"
+                ),
+                "Avg 1h later": (
+                    f"{r['avg_score_after']:+.1f}"
+                    if r["avg_score_after"] is not None else "—"
+                ),
+            }
+            for r in per_pair[:20]   # cap at top 20 to keep page tight
+        ]
+        st.dataframe(
+            pd.DataFrame(pp_rows), hide_index=True, use_container_width=True,
+        )
+
+    # ── Decay curve (Round 72) ────────────────────────────────────────────
+    # Sustain rate at multiple follow-up windows shows WHERE signal value
+    # bleeds off. If 30min sustain is 80% but 4h sustain is 30%, the score
+    # is short-term predictive but mean-reverts within hours.
+    decay = compute_decay_curve(
+        _score_histories_for_analytics,
+        threshold=70,
+        follow_up_windows_hours=[0.5, 1.0, 2.0, 4.0, 12.0],
+    )
+    decay_rows = [
+        r for r in decay if r["sustain_rate"] is not None
+    ]
+    if decay_rows:
+        st.markdown("**Signal decay curve** (+70 sustain rate by follow-up window)")
+        decay_df = pd.DataFrame({
+            "Follow-up": [f"{r['follow_up_hours']:g}h" for r in decay_rows],
+            "Sustain rate (%)": [r["sustain_rate"] * 100 for r in decay_rows],
+        }).set_index("Follow-up")
+        st.bar_chart(decay_df, height=180)
+        st.caption(
+            "Bars are % of +70 crossings still sustained at each follow-up. "
+            "Flat-and-high = persistent signal; sharply-dropping = signal "
+            "decays fast (short-term tradeable, not buy-and-hold)."
+        )
 
 st.divider()
 
