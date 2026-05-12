@@ -29,6 +29,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run mypy on strict-typed modules
+        # Round 65 — strict on signals.py + thesis.py. Catches refactor
+        # regressions in the pure-function core (composite score, auto-thesis).
+        run: |
+          python -m mypy src/funding_screener/signals.py src/funding_screener/thesis.py
+
       - name: Run unit tests
         run: |
           python -m pytest tests/ -q

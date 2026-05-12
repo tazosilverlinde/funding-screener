@@ -21,7 +21,7 @@ No I/O, no external state — pure function over the inputs.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 
 def _direction_from_score(score: Optional[int]) -> tuple[str, str]:
@@ -61,7 +61,7 @@ def compose_trade_thesis(
     signal_age_hours: Optional[float] = None,
     score_stddev_24h: Optional[float] = None,
     setup_quality_label: Optional[str] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Build a structured thesis dict. Every reason is sourced from one input;
     fields not provided contribute nothing to the result.
 
@@ -252,7 +252,7 @@ def compose_trade_thesis(
     }
 
 
-def format_thesis_for_telegram(thesis: dict, max_reasons_per_section: int = 4) -> str:
+def format_thesis_for_telegram(thesis: dict[str, Any], max_reasons_per_section: int = 4) -> str:
     """Format a thesis dict as compact Markdown for Telegram alert payloads.
 
     Telegram messages cap at 4096 chars; the alerts loop already prepends a

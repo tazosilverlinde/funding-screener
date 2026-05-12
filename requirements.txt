@@ -11,3 +11,6 @@ websockets>=12.0
 # Process memory instrumentation (Round 51) — surfaces RSS in the perf expander
 # against the 2GB per-process budget.
 psutil>=5.9
+# Type-checking on the most-touched pure modules (Round 65). Runs in CI on
+# signals.py + thesis.py; everything else is opt-in via mypy.ini's strict_files.
+mypy>=1.10

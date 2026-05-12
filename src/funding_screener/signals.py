@@ -25,7 +25,7 @@ Conventions used in classification:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 
 StreakDirection = Literal["pos", "neg", "mixed"]
@@ -326,7 +326,7 @@ def compute_composite_score(
     )
 
 
-def compute_realized_volatility(klines: list, days: int = 30) -> Optional[float]:
+def compute_realized_volatility(klines: list[Any], days: int = 30) -> Optional[float]:
     """Annualized realized volatility (in percent) from the last `days` daily closes.
 
     Standard formula: stddev(log returns) * sqrt(365) * 100. Returns None when

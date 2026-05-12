@@ -42,6 +42,24 @@ from funding_screener.streamlit_helpers import (  # noqa: E402
 
 st.set_page_config(page_title="Exchange Flows (on-chain)", layout="wide")
 
+
+# ---- helpers (defined before use — Streamlit pages execute top-to-bottom) ----
+
+def _top_exchange(by_exchange: dict) -> str:
+    """For a flow's per-exchange breakdown, return the exchange with the
+    largest absolute flow (deposits + withdrawals). Returns '—' when there's
+    no data. Title-cased for display.
+    """
+    if not by_exchange:
+        return "—"
+    best: tuple[str, float] = ("", 0.0)
+    for ex, pair in by_exchange.items():
+        absflow = abs(pair.get("deposits_usd", 0.0)) + abs(pair.get("withdrawals_usd", 0.0))
+        if absflow > best[1]:
+            best = (ex, absflow)
+    return best[0].title() or "—"
+
+
 store = boot()
 sidebar_status(store)
 symbol_search_sidebar(store)
@@ -421,16 +439,3 @@ st.markdown(
   standpoint).
 """
 )
-
-
-# ---- helpers ----
-
-def _top_exchange(by_exchange: dict) -> str:
-    if not by_exchange:
-        return "—"
-    best: tuple[str, float] = ("", 0.0)
-    for ex, pair in by_exchange.items():
-        absflow = abs(pair.get("deposits_usd", 0.0)) + abs(pair.get("withdrawals_usd", 0.0))
-        if absflow > best[1]:
-            best = (ex, absflow)
-    return best[0].title() or "—"
