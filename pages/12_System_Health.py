@@ -272,6 +272,76 @@ else:
 st.divider()
 
 
+# ---------------- Signal hit-rate analytics (Round 71) ----------------
+
+st.subheader("6. Signal hit-rate — last 24h")
+st.caption(
+    "Did composite-score crossings actually sustain? For each pair, we find "
+    "every time the score crossed into ±threshold, then look at the score "
+    "1 hour later. Sustained = still in the threshold region after 1h. "
+    "Aggregated across all tracked pairs. Useful for gauging the SIGNAL'S "
+    "own predictive value — meta-quality."
+)
+from funding_screener.analytics import compute_signal_hit_rate  # noqa: E402
+
+_score_histories_for_analytics = store.read_score_histories()
+if not _score_histories_for_analytics:
+    st.caption("Score history empty — wait for the first snapshot (~10 min).")
+else:
+    hit_rate_cols = st.columns(2)
+    bull_stats = compute_signal_hit_rate(
+        _score_histories_for_analytics,
+        threshold=70, follow_up_hours=1.0,
+    )
+    bear_stats = compute_signal_hit_rate(
+        _score_histories_for_analytics,
+        threshold=-70, follow_up_hours=1.0,
+    )
+
+    with hit_rate_cols[0]:
+        st.markdown("**🚀 +70 bullish crossings**")
+        if bull_stats["n_crosses"] == 0:
+            st.caption("No bullish crossings in the window yet.")
+        else:
+            sr = bull_stats["sustain_rate"] or 0.0
+            st.metric(
+                "Sustain rate (1h)",
+                f"{sr * 100:.0f}%",
+                f"{bull_stats['n_sustained']} / {bull_stats['n_crosses']} sustained",
+            )
+            if bull_stats["avg_score_after"] is not None:
+                st.caption(
+                    f"Avg at cross: `{bull_stats['avg_score_at_cross']:+.1f}` → "
+                    f"avg 1h later: `{bull_stats['avg_score_after']:+.1f}` "
+                    f"(Δ {bull_stats['avg_score_delta']:+.1f})"
+                )
+            if bull_stats["n_followup_missing"]:
+                st.caption(
+                    f"_{bull_stats['n_followup_missing']} cross(es) had no "
+                    "follow-up sample within tolerance (too recent or gap in data)._"
+                )
+
+    with hit_rate_cols[1]:
+        st.markdown("**💥 −70 bearish crossings**")
+        if bear_stats["n_crosses"] == 0:
+            st.caption("No bearish crossings in the window yet.")
+        else:
+            sr = bear_stats["sustain_rate"] or 0.0
+            st.metric(
+                "Sustain rate (1h)",
+                f"{sr * 100:.0f}%",
+                f"{bear_stats['n_sustained']} / {bear_stats['n_crosses']} sustained",
+            )
+            if bear_stats["avg_score_after"] is not None:
+                st.caption(
+                    f"Avg at cross: `{bear_stats['avg_score_at_cross']:+.1f}` → "
+                    f"avg 1h later: `{bear_stats['avg_score_after']:+.1f}` "
+                    f"(Δ {bear_stats['avg_score_delta']:+.1f})"
+                )
+
+st.divider()
+
+
 # ---------------- Cache freshness ----------------
 
 st.subheader("6. Cache freshness")
