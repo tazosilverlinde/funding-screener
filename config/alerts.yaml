@@ -51,10 +51,20 @@ alerts:
   watchlist: []
 
   # Composite score crossing extremes — biggest signal-to-noise.
+  # Round 69: per-pair overrides supported via the optional `per_pair` map.
+  # Different pairs have different normal score ranges — BTC tends to top
+  # out around +50, altcoins can hit +85 easily. Defaults fit majors; tune
+  # per-pair for high-vol meme / small-cap names to avoid false positives.
+  # Lookup tries Binance symbol → MEXC symbol → base ticker (first match wins).
   composite_score:
     enabled: true
-    bullish_threshold: 70   # alert when score >= 70
+    bullish_threshold: 70   # alert when score >= 70 (global default)
     bearish_threshold: -70  # alert when score <= -70
+    # Uncomment + edit to override specific pairs:
+    # per_pair:
+    #   BTCUSDT:  { bullish_threshold: 50, bearish_threshold: -50 }
+    #   WIFUSDT:  { bullish_threshold: 85, bearish_threshold: -85 }
+    #   PEPEUSDT: { bullish_threshold: 80, bearish_threshold: -80 }
 
   # Score-Δ-jump alert — fires when the 1h score change is large in either
   # direction. Catches "ARB just rallied 40 score points in an hour" before

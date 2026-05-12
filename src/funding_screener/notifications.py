@@ -540,19 +540,47 @@ def _build_thesis_block_for_row(row) -> str:
     return format_thesis_for_telegram(thesis)
 
 
-def evaluate_composite_alerts(combined_rows, bull_threshold: int, bear_threshold: int) -> list[tuple[str, str, str]]:
+def evaluate_composite_alerts(
+    combined_rows,
+    bull_threshold: int,
+    bear_threshold: int,
+    per_pair: Optional[dict[str, dict]] = None,
+) -> list[tuple[str, str, str]]:
     """Composite-score alert evaluator. Round 38: embeds the auto-thesis in the
     message body so users get the bull/bear/risk breakdown without opening the app.
+
+    Round 69: Per-pair threshold overrides. Some pairs have different normal
+    score ranges (BTC tends to top out around +50; altcoins can hit +85
+    easily). Global defaults are too noisy for high-vol pairs and too tight
+    for low-vol ones. `per_pair` maps SYMBOL (e.g. 'BTCUSDT', 'WIFUSDT') to a
+    dict {'bullish_threshold': int, 'bearish_threshold': int}; missing keys
+    fall back to the global defaults.
+
+    Lookup tries the row's binance_symbol first, then mexc_symbol, then
+    base_asset — first match wins. This lets users key either by full
+    futures symbol or just by base ticker.
     """
+    per_pair = per_pair or {}
     out: list[tuple[str, str, str]] = []
     for r in combined_rows:
         if r.composite_score is None:
             continue
         key = f"composite:{r.base_asset}/{r.quote_asset}"
         score = r.composite_score
-        if score >= bull_threshold or score <= bear_threshold:
-            sym = r.binance_symbol or r.mexc_symbol or r.base_asset
-            head_emoji = "🚀" if score >= bull_threshold else "💥"
+        sym = r.binance_symbol or r.mexc_symbol or r.base_asset
+
+        # Resolve effective thresholds. First match wins; falls back to defaults.
+        eff_bull = bull_threshold
+        eff_bear = bear_threshold
+        for candidate in (r.binance_symbol, r.mexc_symbol, r.base_asset):
+            if candidate and candidate in per_pair:
+                override = per_pair[candidate]
+                eff_bull = int(override.get("bullish_threshold", bull_threshold))
+                eff_bear = int(override.get("bearish_threshold", bear_threshold))
+                break
+
+        if score >= eff_bull or score <= eff_bear:
+            head_emoji = "🚀" if score >= eff_bull else "💥"
             thesis_block = _build_thesis_block_for_row(r)
             header = (
                 f"{head_emoji} *{sym}* — composite score `{score:+d}`\n"

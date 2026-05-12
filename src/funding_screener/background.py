@@ -987,6 +987,7 @@ async def _alerts_loop(store: DataStore, telegram: TelegramClient) -> None:
                         watchlisted_rows,
                         bull_threshold=int(cs.get("bullish_threshold", 70)),
                         bear_threshold=int(cs.get("bearish_threshold", -70)),
+                        per_pair=cs.get("per_pair") or {},
                     ))
                 if cfg.get("composite_score_delta", {}).get("enabled", True):
                     sd = cfg["composite_score_delta"]
