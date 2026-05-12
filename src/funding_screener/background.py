@@ -127,6 +127,10 @@ class DataStore:
         # Recent-errors ring buffer (Round 56). last_error keeps the freshest;
         # this is the last 50 with timestamps for the System Health page.
         self.recent_errors: list[tuple[datetime, str]] = []
+        # Per-task crash-and-restart counters (Round 64). Incremented by the
+        # supervisor every time a background task escapes its own try/except
+        # and the supervisor catches + restarts it. Visible on System Health.
+        self.task_restart_counts: dict[str, int] = {}
         # 24h rolling buffer of liquidation events from the Binance forceOrder
         # WebSocket stream. Owns its own asyncio.Lock; safe to call aggregate_*
         # from any thread because the underlying deques only mutate via the WS
@@ -1533,6 +1537,47 @@ async def _daily_digest_loop(
         await asyncio.sleep(60)
 
 
+async def _supervised(coro_factory, name: str, store: "DataStore") -> None:
+    """Outer supervisor around a background loop (Round 64).
+
+    Each background loop already has an inner `while True: try/except` that
+    handles normal errors. This wrapper is the OUTER layer that catches
+    catastrophic failures that escape the inner try — rare but possible
+    (e.g. a bug in the loop's own control-flow, an unhandled BaseException
+    subclass, a C-extension crash bubbling up through async).
+
+    On exception: log, record_error, increment restart counter, sleep with
+    exponential backoff (1s → 60s capped), then re-create the coroutine and
+    try again. asyncio.CancelledError is re-raised so graceful shutdown still
+    works.
+
+    coro_factory is a zero-arg callable returning a fresh coroutine each
+    call — you can't re-await an already-consumed one.
+    """
+    backoff_s = 1
+    while True:
+        try:
+            await coro_factory()
+        except asyncio.CancelledError:
+            log.info("supervised task %s cancelled cleanly", name)
+            raise
+        except Exception as exc:
+            log.exception("supervised task %s crashed; restarting in %ds", name, backoff_s)
+            store.record_error(
+                f"task[{name}]: crashed and restarting: {type(exc).__name__}: {exc}"
+            )
+            store.task_restart_counts[name] = (
+                store.task_restart_counts.get(name, 0) + 1
+            )
+        else:
+            # Inner loop returned cleanly (not expected for our while-True
+            # loops, but defensive). Treat as a finished task — don't restart.
+            log.info("supervised task %s returned cleanly; not restarting", name)
+            return
+        await asyncio.sleep(backoff_s)
+        backoff_s = min(backoff_s * 2, 60)
+
+
 def _runner() -> None:
     """Entry-point for the daemon thread. Owns its own event loop and clients."""
     loop = asyncio.new_event_loop()
@@ -1555,30 +1600,39 @@ def _runner() -> None:
     _runner_state["telegram"] = telegram  # Round 61: needed by System Health page
     try:
         _store.bg_started_at = datetime.now(timezone.utc)
-        loop.create_task(_fast_loop(_store, binance, mexc))
-        loop.create_task(_slow_loop(_store, binance, mexc))
-        loop.create_task(_market_caps_loop(_store, mcap_client))
-        loop.create_task(_enrichment_loop(_store, binance, mexc))
-        loop.create_task(_macro_loop(_store, llama))
+        # Every background task is wrapped in _supervised so a fatal exception
+        # escaping its inner try/except triggers an exponential-backoff restart
+        # instead of silently killing the task (Round 64). coro_factory pattern
+        # is required because you can't re-await an already-consumed coroutine.
+        def _spawn(factory, name: str) -> None:
+            loop.create_task(_supervised(factory, name, _store))
+
+        _spawn(lambda: _fast_loop(_store, binance, mexc), "fast")
+        _spawn(lambda: _slow_loop(_store, binance, mexc), "slow")
+        _spawn(lambda: _market_caps_loop(_store, mcap_client), "market_caps")
+        _spawn(lambda: _enrichment_loop(_store, binance, mexc), "enrichment")
+        _spawn(lambda: _macro_loop(_store, llama), "macro")
         # Onchain task per chain — runs in parallel; each chain has its own RPC
         # fallback list so a slow BSC node won't block ETH.
         for chain_name, client in chain_clients.items():
-            loop.create_task(_onchain_loop(_store, client))
+            # Bind the loop var by default-arg so each iteration captures its own
+            # client (otherwise late-binding causes all closures to share the last).
+            _spawn(lambda c=client: _onchain_loop(_store, c), f"onchain.{chain_name}")
         # Macro flow per chain — same liquidity-stack tokens (stables + BTC + ETH
         # proxy) on each, but BSC uses Binance-Peg variants with 18 decimals.
         for chain_name, client in chain_clients.items():
-            loop.create_task(_macro_flow_loop(_store, client))
-        loop.create_task(_score_history_loop(_store))
-        loop.create_task(_alerts_loop(_store, telegram))
+            _spawn(lambda c=client: _macro_flow_loop(_store, c), f"macro_flow.{chain_name}")
+        _spawn(lambda: _score_history_loop(_store), "score_history")
+        _spawn(lambda: _alerts_loop(_store, telegram), "alerts")
         # Liquidation tape — long-running WebSocket consumer. The task auto-
-        # reconnects with exponential backoff on any drop, so spawning it once
-        # is enough; nothing here observes its return value.
-        loop.create_task(consume_binance_liquidations(_store.liquidations))
+        # reconnects on any drop internally; supervisor adds a second layer
+        # for catastrophic failures.
+        _spawn(lambda: consume_binance_liquidations(_store.liquidations), "liquidations")
         # Daily digest delivery (Telegram + email, sends only at hour_utc).
-        loop.create_task(_daily_digest_loop(_store, telegram, email))
+        _spawn(lambda: _daily_digest_loop(_store, telegram, email), "daily_digest")
         # Alert summary digest (Round 50) — periodic batched summary of recent
         # alert fires; complementary to the per-event Telegram messages.
-        loop.create_task(_alerts_summary_loop(_store, telegram))
+        _spawn(lambda: _alerts_summary_loop(_store, telegram), "alerts_summary")
         loop.run_forever()
     finally:
         try:

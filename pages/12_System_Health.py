@@ -95,6 +95,7 @@ if not _loop_stats:
 else:
     rows: list[dict] = []
     now_utc = datetime.now(timezone.utc)
+    restart_counts = getattr(store, "task_restart_counts", {}) or {}
     # Hardcoded expected intervals — same as the loop-stall alert evaluator.
     _expected = {
         "fast": 60, "slow": 300, "market_caps": 300, "enrichment": 180,
@@ -132,6 +133,7 @@ else:
             "P95 (s)": round(s["p95_s"], 2),
             "Last (s)": round(s["last_s"], 2),
             "Samples": s["samples"],
+            "Restarts": restart_counts.get(name, 0),
         })
     st.dataframe(
         pd.DataFrame(rows), hide_index=True, use_container_width=True,
@@ -140,11 +142,18 @@ else:
             "P95 (s)": st.column_config.NumberColumn(format="%.2f"),
             "Last (s)": st.column_config.NumberColumn(format="%.2f"),
             "Samples": st.column_config.NumberColumn(format="%d"),
+            "Restarts": st.column_config.NumberColumn(
+                format="%d",
+                help="Number of times the supervisor (Round 64) had to catch a "
+                     "fatal exception and restart this task. 0 = healthy lifetime; "
+                     "> 0 = task crashed but recovered; persistent climb = real bug.",
+            ),
         },
     )
 st.caption(
     "Status `⚠️ STALLED` means the loop hasn't completed a cycle in ≥3× its "
-    "expected interval — same threshold the loop_stall Telegram alert uses."
+    "expected interval — same threshold the loop_stall Telegram alert uses. "
+    "**Restarts** counts supervisor recoveries (Round 64) — should stay at 0."
 )
 
 st.divider()
