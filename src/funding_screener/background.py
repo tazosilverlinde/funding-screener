@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -117,7 +118,19 @@ class DataStore:
         self.last_macro_flows_at_by_chain: dict[str, datetime] = {}
         # Composite-score history per (base_asset, quote_asset), trimmed to last 24h.
         # Each value is a list of (timestamp_utc, score_int) tuples in chronological order.
+        # Persists to disk when SCORE_HISTORY_PATH is set (Round 67) — survives
+        # restart so signals don't have to rebuild from zero for 10+ minutes.
         self.score_history: dict[tuple[str, str], list[tuple[datetime, int]]] = {}
+        _sh_raw = os.getenv("SCORE_HISTORY_PATH", "").strip()
+        self._score_history_persist_path = Path(_sh_raw) if _sh_raw else None
+        if self._score_history_persist_path is not None:
+            try:
+                self._score_history_persist_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                self._score_history_persist_path = None
+        # Defer the load: __init__ continues below, and we need
+        # _trim_history's HISTORY_WINDOW_HOURS already imported (it is, via
+        # _trim_history alias of score_history.trim_old).
         # Per-loop cycle durations in seconds (last 50). Drives the perf expander.
         self.loop_timings: dict[str, list[float]] = {}
         # Wall-clock timestamp of each loop's most recent cycle completion.
@@ -143,8 +156,7 @@ class DataStore:
         # ALERT_LOG_PATH env var controls the persistence target:
         #   unset / empty → in-memory only (existing behavior, no disk I/O)
         #   set to a path → file is read on startup + appended on each fire
-        import os as _os
-        _persist_raw = _os.getenv("ALERT_LOG_PATH", "").strip()
+        _persist_raw = os.getenv("ALERT_LOG_PATH", "").strip()
         _persist_path = Path(_persist_raw) if _persist_raw else None
         if _persist_path is not None:
             try:
@@ -160,7 +172,7 @@ class DataStore:
         # on startup and rewrite on every add/remove. Expired entries pruned
         # both in memory (read-time) and on disk (write-time).
         self.alert_mutes: dict[str, float] = {}
-        _mutes_raw = _os.getenv("ALERT_MUTES_PATH", "").strip()
+        _mutes_raw = os.getenv("ALERT_MUTES_PATH", "").strip()
         self._mutes_persist_path = Path(_mutes_raw) if _mutes_raw else None
         if self._mutes_persist_path is not None:
             try:
@@ -168,6 +180,11 @@ class DataStore:
             except Exception:
                 self._mutes_persist_path = None  # uncreatable → fall back to in-memory
         self._load_mutes_from_disk()
+        # Score history must load AFTER __init__ has set up _trim_history's
+        # window constant via the import below — but since _trim_history is
+        # an alias for score_history.trim_old (imported at module top), it's
+        # always available. Safe to call here.
+        self._load_score_history_from_disk()
         self.last_fast_at: Optional[datetime] = None  # funding/contracts/volumes
         self.last_slow_at: Optional[datetime] = None  # klines
         self.last_market_caps_at: Optional[datetime] = None
@@ -293,7 +310,12 @@ class DataStore:
             }
 
     def snapshot_scores(self, scores_by_key: dict[tuple[str, str], int]) -> None:
-        """Append a (now, score) entry per (base, quote) and trim to 24h."""
+        """Append a (now, score) entry per (base, quote) and trim to 24h.
+
+        Also persists to disk when SCORE_HISTORY_PATH is set (Round 67) so
+        scores survive restart. Atomic write via .tmp + rename so a crash
+        mid-write doesn't leave a half-written file.
+        """
         now = datetime.now(timezone.utc)
         with self._lock:
             for key, score in scores_by_key.items():
@@ -304,6 +326,90 @@ class DataStore:
             # Drop stale (key, []) pairs that may exist from a previous bigger universe.
             self.score_history = {k: v for k, v in self.score_history.items() if v}
             self.last_score_snapshot_at = now
+        self._save_score_history_to_disk()
+
+    def _load_score_history_from_disk(self) -> None:
+        """Restore score history from disk on startup (Round 67).
+
+        Handles missing / corrupted / partially-written files gracefully —
+        the screener should never refuse to start because of bad on-disk
+        state. Samples older than HISTORY_WINDOW_HOURS are dropped on load.
+        """
+        import json as _json
+        if self._score_history_persist_path is None:
+            return
+        path = self._score_history_persist_path
+        if not path.exists():
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+            data = _json.loads(raw) if raw.strip() else {}
+        except Exception as exc:
+            log.warning("score_history: failed to load %s: %s", path, exc)
+            return
+        if not isinstance(data, dict):
+            return
+        now = datetime.now(timezone.utc)
+        loaded = 0
+        with self._lock:
+            for key_str, samples in data.items():
+                # Key is serialized as "BASE|QUOTE"; split back to tuple form.
+                if not isinstance(key_str, str) or "|" not in key_str:
+                    continue
+                base, quote = key_str.split("|", 1)
+                if not isinstance(samples, list):
+                    continue
+                parsed: list[tuple[datetime, int]] = []
+                for entry in samples:
+                    if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                        continue
+                    ts_raw, score_raw = entry
+                    try:
+                        ts = datetime.fromisoformat(ts_raw)
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        score = int(score_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    parsed.append((ts, score))
+                trimmed = _trim_history(parsed, now)
+                if trimmed:
+                    self.score_history[(base, quote)] = trimmed
+                    loaded += len(trimmed)
+        if loaded:
+            log.info("score_history: loaded %d samples from %s", loaded, path)
+
+    def _save_score_history_to_disk(self) -> None:
+        """Atomically rewrite the score history file (Round 67).
+
+        Uses .tmp + os.replace so a crash mid-write can't corrupt the file.
+        Best-effort: errors logged, never propagate. Skipped when no path
+        configured (default).
+        """
+        import json as _json
+        if self._score_history_persist_path is None:
+            return
+        path = self._score_history_persist_path
+        with self._lock:
+            payload = {
+                f"{base}|{quote}": [
+                    [ts.isoformat(), int(score)] for ts, score in samples
+                ]
+                for (base, quote), samples in self.score_history.items()
+            }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp_path.write_text(_json.dumps(payload, ensure_ascii=False),
+                                encoding="utf-8")
+            # Atomic on the same filesystem (Linux/macOS) and reasonably
+            # safe on Windows — os.replace overwrites the target.
+            os.replace(tmp_path, path)
+        except Exception as exc:
+            log.warning("score_history: failed to write %s: %s", path, exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def read_score_histories(self) -> dict[tuple[str, str], list[tuple[datetime, int]]]:
         with self._lock:
